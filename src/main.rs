@@ -1,7 +1,7 @@
 //! Yt Music Downloader
 
 use crate::download_song::download_song;
-use crate::embed_lyrics::embed_lyrics;
+use crate::embedded_lyrics::embed_lyrics;
 use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
 use crate::parse_yt_item_info::{PlaylistInfo, SongInfo, YtItem, download_yt_item_info};
 use crate::yt_dlp::{has_ffmpeg, has_ffprobe};
@@ -27,13 +27,14 @@ use tracing::{Level, error, info, trace};
 use url::Url;
 
 mod download_song;
-mod embed_lyrics;
+mod embedded_lyrics;
+mod embedded_yt_id;
 mod logging;
 mod lrclib_net;
 mod parse_yt_item_info;
 mod yt_dlp;
 
-const FILE_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus", "wav"];
+const FILE_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus"];
 
 pub const NAME: &str = env!("CARGO_PKG_NAME");
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -6,7 +6,6 @@
 //! | M4A/MP4     | `©lyr` atom                 | `©lyr` atom                 |
 //! | FLAC        | `UNSYNCEDLYRICS` Vorbis cmt | `LYRICS` Vorbis cmt         |
 //! | Opus / OGG  | `UNSYNCEDLYRICS` Vorbis cmt | `LYRICS` Vorbis cmt         |
-//! | WAV         | not supported               | not supported               |
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -34,7 +33,7 @@ pub enum EmbedResult {
 }
 
 /// Embed lyrics into `file`. The format is inferred from the file extension:
-/// `mp3`, `m4a`/`mp4`/`m4b`/`aac`, `flac`, `opus`/`ogg`, `wav`.
+/// `mp3`, `m4a`/`mp4`/`m4b`/`aac`, `flac`, `opus`/`ogg`.
 pub fn embed_lyrics(
   file: &Path,
   plain_lyrics: Option<&str>,
@@ -54,9 +53,6 @@ pub fn embed_lyrics(
     "mp3" => embed_mp3(file, plain_lyrics, synced_lyrics),
     "m4a" | "mp4" | "m4b" | "aac" => embed_mp4(file, plain_lyrics, synced_lyrics),
     "flac" | "opus" | "ogg" => embed_vorbis(file, plain_lyrics, synced_lyrics),
-    "wav" => Ok(EmbedResult::Unsupported {
-      reason: "WAV files do not have a widely-supported lyrics container",
-    }),
     _ => Ok(EmbedResult::Unsupported {
       reason: "this audio format does not support embedded lyrics",
     }),
@@ -243,4 +239,106 @@ fn parse_lrc(lrc: &str) -> Vec<(u32, String)> {
 
   entries.sort_by_key(|(ts, _)| *ts);
   entries
+}
+
+/// Presence of the two kinds of lyrics in an audio file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LyricsPresence {
+  pub has_unsynced_lyrics: bool,
+  pub has_synced_lyrics: bool,
+}
+
+/// Inspect `file` and report which kinds of lyrics are embedded.
+///
+/// The format is inferred from the extension, matching [`embed_lyrics`]:
+///
+/// * MP3 — `USLT` ⇒ unsynced, `SYLT` ⇒ synced (both can coexist).
+/// * M4A/MP4 — the single `©lyr` atom is classified by inspecting its
+///   content: if the text parses as LRC it counts as *synced*, otherwise
+///   as *unsynced*.
+/// * FLAC/Opus/OGG — `UNSYNCEDLYRICS` ⇒ unsynced; `LYRICS` is classified
+///   by content (LRC ⇒ synced, otherwise unsynced).
+/// * anything else — both flags are `false`.
+pub fn detect_lyrics(file: &Path) -> Result<LyricsPresence> {
+  let ext = file
+    .extension()
+    .and_then(|s| s.to_str())
+    .map(str::to_ascii_lowercase)
+    .context("audio file has no extension")?;
+
+  match ext.as_str() {
+    "mp3" => detect_lyrics_mp3(file),
+    "m4a" | "mp4" | "m4b" | "aac" => detect_lyrics_mp4(file),
+    "flac" | "opus" | "ogg" => detect_lyrics_vorbis(file),
+    // WAV / unknown: no lyrics containers are ever written, so nothing
+    // to detect.
+    _ => Ok(LyricsPresence::default()),
+  }
+}
+
+/// MP3: `USLT` and `SYLT` are distinct frames, so this is exact.
+fn detect_lyrics_mp3(file: &Path) -> Result<LyricsPresence> {
+  let tag = id3::Tag::read_from_path(file).unwrap_or_else(|_| id3::Tag::new());
+  Ok(LyricsPresence {
+    has_unsynced_lyrics: tag.get("USLT").is_some(),
+    has_synced_lyrics: tag.get("SYLT").is_some(),
+  })
+}
+
+/// MP4 / M4A: only `©lyr` exists. Classify by content.
+fn detect_lyrics_mp4(file: &Path) -> Result<LyricsPresence> {
+  let tagged = Probe::open(file)
+    .with_context(|| format!("failed to open {}", file.display()))?
+    .read()
+    .with_context(|| format!("failed to read tags from {}", file.display()))?;
+
+  let text = tagged
+    .primary_tag()
+    .and_then(|t| t.get_string(ItemKey::Lyrics));
+
+  Ok(classify_lyrics_text(text))
+}
+
+/// FLAC / Opus / OGG: `UNSYNCEDLYRICS` is explicitly unsynced; `LYRICS`
+/// is classified by content (matches what `embed_vorbis` writes).
+fn detect_lyrics_vorbis(file: &Path) -> Result<LyricsPresence> {
+  let tagged = Probe::open(file)
+    .with_context(|| format!("failed to open {}", file.display()))?
+    .read()
+    .with_context(|| format!("failed to read tags from {}", file.display()))?;
+
+  let tag = match tagged.primary_tag() {
+    Some(t) => t,
+    None => return Ok(LyricsPresence::default()),
+  };
+
+  let unsynced = tag
+    .get_string(ItemKey::UnsyncLyrics)
+    .filter(|s| !s.trim().is_empty());
+  let lyrics = tag
+    .get_string(ItemKey::Lyrics)
+    .filter(|s| !s.trim().is_empty());
+
+  let lyrics_is_synced = lyrics.map(|s| !parse_lrc(s).is_empty()).unwrap_or(false);
+
+  Ok(LyricsPresence {
+    has_unsynced_lyrics: unsynced.is_some() || (lyrics.is_some() && !lyrics_is_synced),
+    has_synced_lyrics: lyrics_is_synced,
+  })
+}
+
+/// Shared heuristic for formats that only have a single lyrics field:
+/// if the text contains at least one LRC timestamp line, treat it as
+/// synced lyrics; otherwise as plain lyrics.
+fn classify_lyrics_text(text: Option<&str>) -> LyricsPresence {
+  match text {
+    Some(s) if !s.trim().is_empty() => {
+      let synced = !parse_lrc(s).is_empty();
+      LyricsPresence {
+        has_unsynced_lyrics: !synced,
+        has_synced_lyrics: synced,
+      }
+    },
+    _ => LyricsPresence::default(),
+  }
 }
