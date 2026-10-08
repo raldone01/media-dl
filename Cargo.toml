@@ -1,0 +1,128 @@
+[workspace]
+resolver = "3"
+
+[workspace.lints.clippy]
+let_and_return = "allow"
+needless_lifetimes = "allow"
+option_if_let_else = "allow"
+# see: https://github.com/bevyengine/bevy/pull/15375#issuecomment-2366966219
+too_long_first_doc_paragraph = "allow"
+missing_panics_doc = "allow"
+doc-markdown = "allow"
+
+nursery = { priority = -1, level = "warn" }
+pedantic = { priority = -1, level = "warn" }
+doc_markdown = "warn"
+manual_let_else = "warn"
+match_same_arms = "warn"
+redundant_closure_for_method_calls = "warn"
+redundant_else = "warn"
+semicolon_if_nothing_returned = "warn"
+type_complexity = "allow"
+undocumented_unsafe_blocks = "warn"
+unwrap_or_default = "warn"
+
+ptr_as_ptr = "warn"
+ptr_cast_constness = "warn"
+ref_as_ptr = "warn"
+
+std_instead_of_core = "warn"
+std_instead_of_alloc = "warn"
+alloc_instead_of_core = "warn"
+
+[workspace.lints.rust]
+nonstandard-style = "warn"
+future-incompatible = "warn"
+missing_docs = "warn"
+unused = { priority = -1, level = "warn" }
+rust_2018_idioms = { priority = -1, level = "warn" }
+rust-2024-compatibility = "warn"
+array-into-iter = "warn"
+bare-trait-objects = "warn"
+ellipsis-inclusive-range-patterns = "warn"
+non-fmt-panics = "warn"
+explicit-outlives-requirements = "warn"
+unused-extern-crates = "warn"
+unexpected_cfgs = { level = "warn" }
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "warn"
+unused_qualifications = "warn"
+
+# Enable more optimization in the release profile at the cost of compile time.
+[profile.release]
+# Compile the entire crate as one unit.
+# Slows compile times, marginal improvements.
+# codegen-units = 1
+# Do a second optimization pass over the entire program, including dependencies.
+# Slows compile times, marginal improvements.
+lto = "thin"
+[package]
+name = "gytm-dl"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/raldone01/gytm-down"
+repository = "https://github.com/raldone01/gytm-down"
+readme = "README.md"
+description = "Simple tool for downloading songs from youtube music!"
+categories = []
+keywords = []
+
+[dependencies]
+clap = { version = "4.5", default-features = false, features = [
+  "cargo",
+  "std",
+  "color",
+  "help",
+  "usage",
+  "error-context",
+  "suggestions",
+  "wrap_help",
+] }
+thiserror = { version = "2.0", default-features = false, features = [
+  "std", # Provides support for backtraces.
+] }
+tracing = { version = "0.1", default-features = false, features = [
+  "std",        # No idea what this changes. It is not required.
+  "attributes", # No idea what this changes. It is not required.
+] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "env-filter",
+  "fmt",
+  "smallvec",   # No idea what this changes. It is not required.
+  "std",        # No idea what this changes. It is not required.
+] }
+chrono = { version = "0.4", default-features = false, features = [
+  "std",
+  "clock",
+] }
+jwalk = { version = "0.9", default-features = false }
+rayon = { version = "1.10", default-features = false }
+ctrlc = { version = "3.5.2", default-features = false }
+regex = { version = "1.11", default-features = false, features = [
+  "unicode-case", # Minimal necessary feature
+  "unicode-perl", # Minimal necessary feature
+  "unicode",      # Enable all unicode features for safety
+  "std",          # Improves performance
+  "perf",         # Improves performance further
+] }
+anyhow = { version = "1.0", default-features = false, features = [
+  "std", # No idea what this changes. It is not required.
+] }
+libc = { version = "0.2.180", default-features = false, features = [
+  "std", # No idea what this changes. It is not required.
+] }
+url = { version = "2.5.8", features = ["serde"] }
+serde_json = "1.0.151"
+serde = { version = "1.0.229", features = ["derive"] }
+reqwest = { version = "0.13.5", features = ["query", "json", "blocking"] }
+id3 = "1.17.2"
+lofty = "0.25.4"
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+rustdoc-args = ["-Zunstable-options", "--generate-link-to-definition"]
+all-features = true
