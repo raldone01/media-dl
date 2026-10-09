@@ -2,13 +2,15 @@
 
 use crate::download_song::download_song;
 use crate::embedded_lyrics::embed_lyrics;
+use crate::embedded_yt_id::get_yt_id_from_tag;
+use crate::lofty_utils::TaggedFileWithPath;
 use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
 use crate::parse_yt_item_info::{PlaylistInfo, SongInfo, YtItem, download_yt_item_info};
 use crate::utils::file_ext;
 use crate::yt_dlp::{has_ffmpeg, has_ffprobe};
 use crate::{logging::setup_logging, yt_dlp::has_ytdlp};
-use anyhow::Error;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, anyhow};
+use anyhow::{Error, bail};
 use clap::builder::PossibleValuesParser;
 use clap::{Arg, command, value_parser};
 use jwalk::WalkDir;
@@ -49,11 +51,12 @@ struct Cancelled;
 
 struct ExistingSongFile {
   file_path: PathBuf,
+  yt_id: String,
   has_unsynced_lyrics: bool,
   has_synced_lyrics: bool,
 }
 
-enum ExistingEntry {
+enum ExistingFileEntry {
   Playlist(PathBuf),
   Song(ExistingSongFile),
 }
@@ -83,64 +86,86 @@ impl ProcessState {
     }
   }
 
-  fn download_urls(&self) -> Result<()> {
+  fn ingest_existing_file(
+    entry_result: Result<jwalk::DirEntry<((), ())>, jwalk::Error>,
+  ) -> anyhow::Result<Option<ExistingFileEntry>> {
+    let entry = match entry_result {
+      Ok(entry) => entry,
+      Err(e) => {
+        let file_path = e
+          .path()
+          .map_or_else(|| "Unknown path".to_string(), |p| p.display().to_string());
+        bail!("Failed to read file entry while processing directory: {file_path}",);
+      },
+    };
+
+    if !entry.file_type().is_file() {
+      return Ok(None);
+    }
+
+    let file_path = entry.path();
+    let ext = match file_ext(&file_path) {
+      Ok(ext) => ext,
+      Err(error) => {
+        trace!(
+            file_path = %file_path.display(),
+            source = %error,
+            "Ignoring file without file extension."
+        );
+        return Ok(None);
+      },
+    };
+
+    if ext == "m3u8" {
+      Ok(Some(ExistingFileEntry::Playlist(file_path)))
+    } else if FILE_FORMATS.contains(&ext.as_str()) {
+      let tagged_file = TaggedFileWithPath::open(&file_path)?;
+      let Some(tag) = tagged_file.tag() else {
+        bail!("No tag found in the file")
+      };
+      let Some(yt_id) = get_yt_id_from_tag(tag) else {
+        bail!("Couldn't extract a yt id from the file")
+      };
+      // TODO: call into lyrics code
+      Ok(Some(ExistingFileEntry::Song(ExistingSongFile {
+        file_path,
+        yt_id,
+        has_unsynced_lyrics: false,
+        has_synced_lyrics: false,
+      })))
+    } else {
+      Ok(None)
+    }
+  }
+
+  fn download_urls(&self) -> anyhow::Result<()> {
     let lrclib = Lrclib::new(USER_AGENT).context("Failed to initialize LRCLIB client")?;
 
     fs::create_dir_all(&self.output_folder).context("Failed to create output folder")?;
 
-    let mut file_entries = WalkDir::new(&self.output_folder).max_depth(0).into_iter();
+    let file_entries = WalkDir::new(&self.output_folder).max_depth(1).into_iter();
 
-    let exiting_files: Vec<ExistingEntry> = match file_entries
+    let exiting_files: Vec<ExistingFileEntry> = match file_entries
       .par_bridge()
-      .map(|entry_result| -> Result<Option<ExistingEntry>, Cancelled> {
-        if self.should_exit.load(Ordering::Relaxed) {
-          return Err(Cancelled);
-        }
+      .map(
+        |entry_result| -> Result<Option<ExistingFileEntry>, Cancelled> {
+          if self.should_exit.load(Ordering::Relaxed) {
+            return Err(Cancelled);
+          }
 
-        let entry = match entry_result {
-          Ok(entry) => entry,
-          Err(e) => {
-            let file_path = e
-              .path()
-              .map_or_else(|| "Unknown path".to_string(), |p| p.display().to_string());
-            error!(
-                file_path = %file_path,
-                source = %e,
-                "Failed to read file entry while processing directory",
-            );
-            return Ok(None);
-          },
-        };
-
-        if !entry.file_type().is_file() {
-          return Ok(None);
-        }
-
-        let file_path = entry.path();
-        let ext = match file_ext(&file_path) {
-          Ok(ext) => ext,
-          Err(error) => {
-            trace!(
-                file_path = %file_path.display(),
-                source = %error,
-                "Ignoring file without file extension."
-            );
-            return Ok(None);
-          },
-        };
-
-        if ext == "m3u8" {
-          Ok(Some(ExistingEntry::Playlist(file_path)))
-        } else if FILE_FORMATS.contains(&ext.as_str()) {
-          Ok(Some(ExistingEntry::Song(ExistingSongFile {
-            file_path,
-            has_unsynced_lyrics: false,
-            has_synced_lyrics: false,
-          })))
-        } else {
-          Ok(None)
-        }
-      })
+          match Self::ingest_existing_file(entry_result) {
+            Ok(existing_file_entry) => Ok(existing_file_entry),
+            Err(error) => {
+              // TODO: collect errors
+              error!(
+                  source = %error,
+                  "Failed to read file entry while processing directory",
+              );
+              Ok(None)
+            },
+          }
+        },
+      )
       // Short-circuits on the first Err; Rayon stops dispatching
       // new items to workers and the outstanding map() calls are dropped.
       .collect::<Result<Vec<_>, Cancelled>>()
@@ -156,8 +181,8 @@ impl ProcessState {
 
     for entry in exiting_files {
       match entry {
-        ExistingEntry::Playlist(p) => existing_playlists.push(p),
-        ExistingEntry::Song(s) => existing_songs.push(s),
+        ExistingFileEntry::Playlist(p) => existing_playlists.push(p),
+        ExistingFileEntry::Song(s) => existing_songs.push(s),
       }
     }
 
@@ -223,7 +248,10 @@ impl ProcessState {
   }
 }
 
-fn get_lyrics_for_song_info(lrclib: &Lrclib, song_info: &SongInfo) -> Result<Option<Lyrics>> {
+fn get_lyrics_for_song_info(
+  lrclib: &Lrclib,
+  song_info: &SongInfo,
+) -> anyhow::Result<Option<Lyrics>> {
   let mut query = TrackQuery::new(&song_info.title);
   query = query.artist(&song_info.artist);
   query = query.album(&song_info.album);
@@ -309,7 +337,7 @@ fn new_argparser() -> clap::Command {
     )
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
   let matches = new_argparser().get_matches();
 
   // set the correct log level

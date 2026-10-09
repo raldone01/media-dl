@@ -57,6 +57,10 @@ impl TaggedFileWithPath {
     Ok(())
   }
 
+  pub fn tag(&self) -> Option<&Tag> {
+    self.tagged_file.primary_tag()
+  }
+
   pub fn overwrite(&self) -> Result<()> {
     let Some(file_path) = self.file_path.as_deref() else {
       bail!("No file_path associated with the TaggedFile.");
