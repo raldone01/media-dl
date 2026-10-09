@@ -7,6 +7,8 @@
 //! | FLAC        | `UNSYNCEDLYRICS` Vorbis cmt | `LYRICS` Vorbis cmt         |
 //! | Opus / OGG  | `UNSYNCEDLYRICS` Vorbis cmt | `LYRICS` Vorbis cmt         |
 
+// TODO: rewrite to make use of infra and patterns established in embedded_yt_id
+
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
@@ -20,6 +22,8 @@ use lofty::file::{TaggedFile, TaggedFileExt};
 use lofty::prelude::*;
 use lofty::probe::Probe;
 use lofty::tag::{ItemKey, Tag, TagType};
+
+use crate::utils::file_ext;
 
 /// Outcome of an embedding request. Anything an audio format simply does not
 /// support is reported *here* rather than as an error, because it is a
@@ -43,11 +47,7 @@ pub fn embed_lyrics(
     return Ok(EmbedResult::Embedded);
   }
 
-  let ext = file
-    .extension()
-    .and_then(|s| s.to_str())
-    .map(str::to_ascii_lowercase)
-    .context("audio file has no extension")?;
+  let ext = file_ext(file).context("Audio file has no extension")?;
 
   match ext.as_str() {
     "mp3" => embed_mp3(file, plain_lyrics, synced_lyrics),
@@ -187,6 +187,7 @@ fn save_tagged(file: &Path, tagged: &mut TaggedFile) -> Result<()> {
 /// `[mm:ss:xx]`, and multiple timestamps on the same line
 /// (e.g. `[00:01.00][00:10.00]Chorus`). Unknown metadata lines such as
 /// `[ar:Artist]` are skipped.
+#[must_use]
 fn parse_lrc(lrc: &str) -> Vec<(u32, String)> {
   use regex::Regex;
   // The whole-tag regex, anchored by requiring consecutive tags at the start.
@@ -260,11 +261,7 @@ pub struct LyricsPresence {
 ///   by content (LRC ⇒ synced, otherwise unsynced).
 /// * anything else — both flags are `false`.
 pub fn detect_lyrics(file: &Path) -> Result<LyricsPresence> {
-  let ext = file
-    .extension()
-    .and_then(|s| s.to_str())
-    .map(str::to_ascii_lowercase)
-    .context("audio file has no extension")?;
+  let ext = file_ext(file).context("Audio file has no extension")?;
 
   match ext.as_str() {
     "mp3" => detect_lyrics_mp3(file),
@@ -330,6 +327,7 @@ fn detect_lyrics_vorbis(file: &Path) -> Result<LyricsPresence> {
 /// Shared heuristic for formats that only have a single lyrics field:
 /// if the text contains at least one LRC timestamp line, treat it as
 /// synced lyrics; otherwise as plain lyrics.
+#[must_use]
 fn classify_lyrics_text(text: Option<&str>) -> LyricsPresence {
   match text {
     Some(s) if !s.trim().is_empty() => {

@@ -1,0 +1,30 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug with YT args",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=gytm-dl"
+        ],
+        "filter": {
+          "name": "gytm-dl",
+          "kind": "bin"
+        }
+      },
+      "args": [
+        "--output-folder",
+        "./tmp/out",
+        "--cookies",
+        "${env:HOME}/Downloads/cookies.txt",
+        "https://music.youtube.com/watch?v=XqoanTj5pNY",
+        "--format",
+        "mp3"
+      ],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

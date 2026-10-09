@@ -8,6 +8,8 @@ use std::{
 use tempfile::TempDir;
 use url::Url;
 
+use crate::{embedded_yt_id::embed_yt_id_tag, lofty_utils::TaggedFileWithPath};
+
 pub fn download_song(output_dir: &Path, url: &Url, format: &str) -> Result<PathBuf> {
   let temp_dir = TempDir::new_in(output_dir).context("failed to create temp dir")?;
   let output_template = temp_dir
@@ -34,10 +36,12 @@ pub fn download_song(output_dir: &Path, url: &Url, format: &str) -> Result<PathB
       r#"ThumbnailsConvertor:-vf crop="'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'""#,
       // Prefer the video itself when the URL points into a playlist.
       "--no-playlist",
-      // Print only the final output path after all post-processing.
+      // Print the video id (line 1) and the final output path (line 2).
+      "--print",
+      "after_move:%(id)s",
       "--print",
       "after_move:filepath",
-      // Avoid normal yt-dlp progress/output so stdout contains the path.
+      // Avoid normal yt-dlp progress/output so stdout contains exactly those two lines.
       "--quiet",
       "--no-warnings",
     ])
@@ -56,15 +60,24 @@ pub fn download_song(output_dir: &Path, url: &Url, format: &str) -> Result<PathB
     );
   }
 
-  // Path reported by yt-dlp, still located inside the temp dir.
-  let temp_path = String::from_utf8(output.stdout)
-    .context("yt-dlp produced invalid UTF-8 in its output")?
-    .lines()
-    .last()
-    .map(str::trim)
-    .filter(|path| !path.is_empty())
-    .map(PathBuf::from)
-    .context("yt-dlp did not report an output file")?;
+  let stdout =
+    String::from_utf8(output.stdout).context("yt-dlp produced invalid UTF-8 in its output")?;
+  let mut lines = stdout.lines().map(str::trim).filter(|l| !l.is_empty());
+
+  let yt_id = lines
+    .next()
+    .context("yt-dlp did not report a video id")?
+    .to_owned();
+
+  let temp_path: PathBuf = lines
+    .next()
+    .context("yt-dlp did not report an output file")?
+    .into();
+
+  // add a ytid tag
+  let mut tagged_file = TaggedFileWithPath::open(&temp_path)?;
+  tagged_file.patch_tag(embed_yt_id_tag(&yt_id))?;
+  tagged_file.overwrite()?;
 
   let file_name = temp_path
     .file_name()

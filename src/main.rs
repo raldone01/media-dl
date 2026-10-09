@@ -4,6 +4,7 @@ use crate::download_song::download_song;
 use crate::embedded_lyrics::embed_lyrics;
 use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
 use crate::parse_yt_item_info::{PlaylistInfo, SongInfo, YtItem, download_yt_item_info};
+use crate::utils::file_ext;
 use crate::yt_dlp::{has_ffmpeg, has_ffprobe};
 use crate::{logging::setup_logging, yt_dlp::has_ytdlp};
 use anyhow::Error;
@@ -29,9 +30,12 @@ use url::Url;
 mod download_song;
 mod embedded_lyrics;
 mod embedded_yt_id;
+mod lofty_utils;
 mod logging;
 mod lrclib_net;
+mod parse_id_from_yt_url;
 mod parse_yt_item_info;
+mod utils;
 mod yt_dlp;
 
 const FILE_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus"];
@@ -113,15 +117,12 @@ impl ProcessState {
         }
 
         let file_path = entry.path();
-        let ext = match file_path
-          .extension()
-          .and_then(|s| s.to_str())
-          .map(str::to_ascii_lowercase)
-        {
-          Some(ext) => ext,
-          None => {
+        let ext = match file_ext(&file_path) {
+          Ok(ext) => ext,
+          Err(error) => {
             trace!(
                 file_path = %file_path.display(),
+                source = %error,
                 "Ignoring file without file extension."
             );
             return Ok(None);
