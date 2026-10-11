@@ -1,14 +1,14 @@
 //! Yt Music Downloader
 
 use crate::download_song::download_song;
-use crate::embedded_lyrics::embed_lyrics;
-use crate::embedded_yt_id::get_yt_id_from_tag;
+use crate::embedded_lyrics::{LyricsPresence, embed_lyrics_tag, lyrics_presence_from_tag};
+use crate::embedded_yt_id::yt_id_from_tag;
+use crate::has_tools::{has_ffmpeg, has_ffprobe};
 use crate::lofty_utils::TaggedFileWithPath;
 use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
 use crate::parse_yt_item_info::{PlaylistInfo, SongInfo, YtItem, download_yt_item_info};
 use crate::utils::file_ext;
-use crate::yt_dlp::{has_ffmpeg, has_ffprobe};
-use crate::{logging::setup_logging, yt_dlp::has_ytdlp};
+use crate::{has_tools::has_ytdlp, logging::setup_logging};
 use anyhow::{Context, anyhow};
 use anyhow::{Error, bail};
 use clap::builder::PossibleValuesParser;
@@ -32,19 +32,19 @@ use url::Url;
 mod download_song;
 mod embedded_lyrics;
 mod embedded_yt_id;
+mod has_tools;
 mod lofty_utils;
 mod logging;
 mod lrclib_net;
 mod parse_id_from_yt_url;
 mod parse_yt_item_info;
 mod utils;
-mod yt_dlp;
 
 const FILE_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus"];
 
-pub const NAME: &str = env!("CARGO_PKG_NAME");
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+const NAME: &str = env!("CARGO_PKG_NAME");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug)]
 struct Cancelled;
@@ -52,8 +52,7 @@ struct Cancelled;
 struct ExistingSongFile {
   file_path: PathBuf,
   yt_id: String,
-  has_unsynced_lyrics: bool,
-  has_synced_lyrics: bool,
+  lyrics_presence: LyricsPresence,
 }
 
 enum ExistingFileEntry {
@@ -123,15 +122,14 @@ impl ProcessState {
       let Some(tag) = tagged_file.tag() else {
         bail!("No tag found in the file")
       };
-      let Some(yt_id) = get_yt_id_from_tag(tag) else {
+      let Some(yt_id) = yt_id_from_tag(tag) else {
         bail!("Couldn't extract a yt id from the file")
       };
-      // TODO: call into lyrics code
+      let lyrics_presence = lyrics_presence_from_tag(tag);
       Ok(Some(ExistingFileEntry::Song(ExistingSongFile {
         file_path,
         yt_id,
-        has_unsynced_lyrics: false,
-        has_synced_lyrics: false,
+        lyrics_presence,
       })))
     } else {
       Ok(None)
@@ -226,13 +224,12 @@ impl ProcessState {
 
       match get_lyrics_for_song_info(&lrclib, &song_info) {
         Ok(Some(lyrics)) => {
-          match embed_lyrics(
-            &song_path,
+          let mut tagged_file = TaggedFileWithPath::open(&song_path)?;
+          if let Err(error) = tagged_file.patch_tag(embed_lyrics_tag(
             lyrics.plain_lyrics.as_ref().map(|s| s.as_str()),
             lyrics.synced_lyrics.as_ref().map(|s| s.as_str()),
-          ) {
-            Ok(embedded_result) => {},
-            Err(error) => failed_urls.push((url, error)),
+          )) {
+            failed_urls.push((url, error.into()));
           }
         },
         Ok(None) => info!("No lyrics found for {}", song_info.title),

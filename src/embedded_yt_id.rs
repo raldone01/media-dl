@@ -45,43 +45,6 @@ const YTID_KEY_MP4_ATOM: AtomIdent<'_> = AtomIdent::Freeform {
 };
 const YTID_KEY_EXTENDED_URL_FRAME_DESCRIPTION: &str = "YouTube Music";
 
-/// Vendored from lofty
-fn filter_comment_frame_by_description<'a>(
-  frame: &'a lofty::id3::v2::Frame<'_>,
-  description: &str,
-) -> Option<&'a CommentFrame<'a>> {
-  match frame {
-    lofty::id3::v2::Frame::Comment(comment_frame) => {
-      (comment_frame.description == description).then_some(comment_frame)
-    },
-    _ => None,
-  }
-}
-
-fn filter_user_text_frame_by_description<'a>(
-  frame: &'a lofty::id3::v2::Frame<'_>,
-  description: &str,
-) -> Option<&'a ExtendedTextFrame<'a>> {
-  match frame {
-    lofty::id3::v2::Frame::UserText(user_text_frame) => {
-      (user_text_frame.description == description).then_some(user_text_frame)
-    },
-    _ => None,
-  }
-}
-
-fn filter_extended_url_frame_by_description<'a>(
-  frame: &'a lofty::id3::v2::Frame<'_>,
-  description: &str,
-) -> Option<&'a ExtendedUrlFrame<'a>> {
-  match frame {
-    lofty::id3::v2::Frame::UserUrl(extended_url_frame) => {
-      (extended_url_frame.description == description).then_some(extended_url_frame)
-    },
-    _ => None,
-  }
-}
-
 mod embed {
   use super::*;
 
@@ -91,24 +54,18 @@ mod embed {
     UnsupportedTag { tag_type: TagType },
   }
 
-  /// Remove every WXXX frame whose description matches `description`.
-  fn remove_wxxx_frames_by_description(id3v2: &mut Id3v2Tag, description: &str) {
-    id3v2.retain(|frame| filter_extended_url_frame_by_description(frame, description).is_none());
-  }
-
   pub fn embed_yt_id_tag(yt_id: &str) -> impl Fn(Tag) -> Result<Tag, EmbedError> {
     |tag| {
       match tag.tag_type() {
         TagType::Id3v2 => {
+          // for id3v2 insert replaces based on id and description
           let mut id3v2: Id3v2Tag = tag.into();
-          id3v2.remove_user_text(YTID_KEY);
           id3v2.insert_user_text(YTID_KEY.to_string(), yt_id.to_string());
 
           let mut youtube_music_url =
             Url::parse("https://music.youtube.com/watch").expect("valid constant url");
           youtube_music_url.query_pairs_mut().append_pair("v", yt_id);
 
-          remove_wxxx_frames_by_description(&mut id3v2, YTID_KEY_EXTENDED_URL_FRAME_DESCRIPTION);
           id3v2.insert(
             ExtendedUrlFrame::new(
               lofty::TextEncoding::UTF8,
@@ -122,8 +79,7 @@ mod embed {
         },
         TagType::Mp4Ilst => {
           let mut mp4: Ilst = tag.into();
-          let _ = mp4.remove(&YTID_KEY_MP4_ATOM);
-          mp4.insert(Atom::new(
+          mp4.replace_atom(Atom::new(
             YTID_KEY_MP4_ATOM,
             AtomData::UTF8(yt_id.to_string()),
           ));
@@ -148,11 +104,48 @@ mod parse {
   use super::*;
   use crate::parse_id_from_yt_url::yt_id_from_url_str;
 
+  /// Vendored from lofty
+  fn filter_comment_frame_by_description<'a>(
+    frame: &'a lofty::id3::v2::Frame<'_>,
+    description: &str,
+  ) -> Option<&'a CommentFrame<'a>> {
+    match frame {
+      lofty::id3::v2::Frame::Comment(comment_frame) => {
+        (comment_frame.description == description).then_some(comment_frame)
+      },
+      _ => None,
+    }
+  }
+
+  fn filter_user_text_frame_by_description<'a>(
+    frame: &'a lofty::id3::v2::Frame<'_>,
+    description: &str,
+  ) -> Option<&'a ExtendedTextFrame<'a>> {
+    match frame {
+      lofty::id3::v2::Frame::UserText(user_text_frame) => {
+        (user_text_frame.description == description).then_some(user_text_frame)
+      },
+      _ => None,
+    }
+  }
+
+  fn filter_extended_url_frame_by_description<'a>(
+    frame: &'a lofty::id3::v2::Frame<'_>,
+    description: &str,
+  ) -> Option<&'a ExtendedUrlFrame<'a>> {
+    match frame {
+      lofty::id3::v2::Frame::UserUrl(extended_url_frame) => {
+        (extended_url_frame.description == description).then_some(extended_url_frame)
+      },
+      _ => None,
+    }
+  }
+
   /// Try to read the YouTube video ID back from `Tag`.
   ///
   /// Returns `None` when the format is unsupported or the field is simply
   /// not present.
-  pub fn get_yt_id_from_tag(tag: &Tag) -> Option<String> {
+  pub fn yt_id_from_tag(tag: &Tag) -> Option<String> {
     let tag = tag.clone();
 
     match tag.tag_type() {
@@ -240,4 +233,4 @@ mod parse {
 }
 
 pub use embed::{EmbedError, embed_yt_id_tag};
-pub use parse::get_yt_id_from_tag;
+pub use parse::yt_id_from_tag;

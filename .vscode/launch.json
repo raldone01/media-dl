@@ -8,10 +8,10 @@
       "cargo": {
         "args": [
           "build",
-          "--bin=gytm-dl"
+          "--bin=musick-dl"
         ],
         "filter": {
-          "name": "gytm-dl",
+          "name": "musick-dl",
           "kind": "bin"
         }
       },

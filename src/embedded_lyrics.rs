@@ -1,5 +1,10 @@
 //! Embed plain and/or synced (LRC) lyrics into audio files.
 //!
+//! Many formats lack the distinction between synced and unsynced lyrics and the lyric format.
+//! We just store timed LRC lyrics when ever possible for maximum player compatibility.
+//! If we only have plain unsynced lyrics we store those instead.
+//! For id3 we also do the SYLT format which most players don't use.
+//!
 //! | Format      | Plain lyrics                | Synced lyrics               |
 //! |-------------|-----------------------------|-----------------------------|
 //! | MP3         | `USLT` (ID3v2.4)            | `SYLT` (ID3v2.4)            |
@@ -7,179 +12,11 @@
 //! | FLAC        | `UNSYNCEDLYRICS` Vorbis cmt | `LYRICS` Vorbis cmt         |
 //! | Opus / OGG  | `UNSYNCEDLYRICS` Vorbis cmt | `LYRICS` Vorbis cmt         |
 
-// TODO: rewrite to make use of infra and patterns established in embedded_yt_id
-
-use anyhow::{Context, Result, bail};
-use std::path::Path;
-
-use id3::TagLike;
-use id3::frame::{
-  Lyrics as Id3Lyrics, SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat,
-};
-
-use lofty::config::WriteOptions;
-use lofty::file::{TaggedFile, TaggedFileExt};
-use lofty::prelude::*;
-use lofty::probe::Probe;
+use anyhow::Result;
+use lofty::id3::v2::{BinaryFrame, FrameId, Id3v2Tag, UnsynchronizedTextFrame};
 use lofty::tag::{ItemKey, Tag, TagType};
-
-use crate::utils::file_ext;
-
-/// Outcome of an embedding request. Anything an audio format simply does not
-/// support is reported *here* rather than as an error, because it is a
-/// successful, well-understood outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EmbedResult {
-  /// All requested lyrics were embedded.
-  Embedded,
-  /// The format cannot hold any of the requested lyrics.
-  Unsupported { reason: &'static str },
-}
-
-/// Embed lyrics into `file`. The format is inferred from the file extension:
-/// `mp3`, `m4a`/`mp4`/`m4b`/`aac`, `flac`, `opus`/`ogg`.
-pub fn embed_lyrics(
-  file: &Path,
-  plain_lyrics: Option<&str>,
-  synced_lyrics: Option<&str>,
-) -> Result<EmbedResult> {
-  if plain_lyrics.is_none() && synced_lyrics.is_none() {
-    return Ok(EmbedResult::Embedded);
-  }
-
-  let ext = file_ext(file).context("Audio file has no extension")?;
-
-  match ext.as_str() {
-    "mp3" => embed_mp3(file, plain_lyrics, synced_lyrics),
-    "m4a" | "mp4" | "m4b" | "aac" => embed_mp4(file, plain_lyrics, synced_lyrics),
-    "flac" | "opus" | "ogg" => embed_vorbis(file, plain_lyrics, synced_lyrics),
-    _ => Ok(EmbedResult::Unsupported {
-      reason: "this audio format does not support embedded lyrics",
-    }),
-  }
-}
-
-/// MP3 — ID3v2.4 USLT (plain) + SYLT (synced)
-fn embed_mp3(
-  file: &Path,
-  plain_lyrics: Option<&str>,
-  synced_lyrics: Option<&str>,
-) -> Result<EmbedResult> {
-  // Read existing tag if present; otherwise start a fresh one.
-  let mut tag = id3::Tag::read_from_path(file).unwrap_or_else(|_| id3::Tag::new());
-
-  if let Some(text) = plain_lyrics {
-    tag.remove("USLT");
-    tag.add_frame(Id3Lyrics {
-      lang: "eng".to_string(),
-      description: String::new(),
-      text: text.to_string(),
-    });
-  }
-
-  if let Some(lrc) = synced_lyrics {
-    let lines = parse_lrc(lrc);
-    if lines.is_empty() {
-      bail!("synced lyrics did not contain any valid LRC timestamp lines");
-    }
-    tag.remove("SYLT");
-    let synced_lyrics_frame = SynchronisedLyrics {
-      lang: "eng".to_string(),
-      // yt-dlp / MusicBrainz style timestamps are in ms.
-      timestamp_format: TimestampFormat::Ms,
-      content_type: SynchronisedLyricsType::Lyrics,
-      description: "Lyrics".to_string(),
-      content: lines,
-    };
-    tag.add_frame(synced_lyrics_frame);
-  }
-
-  tag
-    .write_to_path(file, id3::Version::Id3v24)
-    .with_context(|| format!("failed to write ID3 tag to {}", file.display()))?;
-
-  Ok(EmbedResult::Embedded)
-}
-
-/// MP4 / M4A — the standard `©lyr` atom.
-///
-/// ISO-BMFF has no dedicated atom for timed lyrics. The de-facto convention
-/// (Picard, beets, MusicBee, foobar2000, …) is to store the LRC text verbatim
-/// in `©lyr` and let the player parse the timestamps. Plain lyrics use the
-/// same atom, so when both are supplied we prefer the synced version because
-/// it already contains the line text.
-fn embed_mp4(
-  file: &Path,
-  plain_lyrics: Option<&str>,
-  synced_lyrics: Option<&str>,
-) -> Result<EmbedResult> {
-  // Choose the richest text we have. Synced wins.
-  let text = match (plain_lyrics, synced_lyrics) {
-    (_, Some(lrc)) => lrc,
-    (Some(plain), None) => plain,
-    (None, None) => return Ok(EmbedResult::Embedded),
-  };
-
-  let mut tagged = open_and_ensure_tag(file, TagType::Mp4Ilst)?;
-  {
-    let tag = tagged
-      .primary_tag_mut()
-      .context("MP4 file has no tag after initialisation")?;
-    tag.remove_key(ItemKey::Lyrics);
-    tag.insert_text(ItemKey::Lyrics, text.to_string());
-  }
-  save_tagged(file, &mut tagged)?;
-
-  Ok(EmbedResult::Embedded)
-}
-
-/// FLAC / Opus / OGG - Vorbis comments
-fn embed_vorbis(
-  file: &Path,
-  plain_lyrics: Option<&str>,
-  synced_lyrics: Option<&str>,
-) -> Result<EmbedResult> {
-  let mut tagged = open_and_ensure_tag(file, TagType::VorbisComments)?;
-  {
-    let tag = tagged
-      .primary_tag_mut()
-      .context("Vorbis comment file has no tag after initialisation")?;
-
-    if let Some(text) = plain_lyrics {
-      tag.remove_key(ItemKey::UnsyncLyrics);
-      tag.insert_text(ItemKey::UnsyncLyrics, text.to_string());
-      tag.remove_key(ItemKey::Lyrics);
-      tag.insert_text(ItemKey::Lyrics, text.to_string());
-    }
-
-    if let Some(lrc) = synced_lyrics {
-      // LRC is stored as-is; players that understand LYRICS will
-      // parse the timestamps themselves.
-      tag.remove_key(ItemKey::Lyrics);
-      tag.insert_text(ItemKey::Lyrics, lrc.to_string());
-    }
-  }
-  save_tagged(file, &mut tagged)?;
-  Ok(EmbedResult::Embedded)
-}
-
-fn open_and_ensure_tag(file: &Path, tag_type: TagType) -> Result<TaggedFile> {
-  let mut tagged = Probe::open(file)
-    .with_context(|| format!("failed to open {}", file.display()))?
-    .read()
-    .with_context(|| format!("failed to read tags from {}", file.display()))?;
-
-  if tagged.primary_tag_mut().is_none() {
-    tagged.insert_tag(Tag::new(tag_type));
-  }
-  Ok(tagged)
-}
-
-fn save_tagged(file: &Path, tagged: &mut TaggedFile) -> Result<()> {
-  tagged
-    .save_to_path(file, WriteOptions::default())
-    .with_context(|| format!("failed to write tags to {}", file.display()))
-}
+use std::convert::Infallible;
+use std::sync::OnceLock;
 
 /// Parse LRC text into `(timestamp_ms, text)` pairs, sorted by time.
 ///
@@ -190,49 +27,61 @@ fn save_tagged(file: &Path, tagged: &mut TaggedFile) -> Result<()> {
 #[must_use]
 fn parse_lrc(lrc: &str) -> Vec<(u32, String)> {
   use regex::Regex;
-  // The whole-tag regex, anchored by requiring consecutive tags at the start.
-  let re = Regex::new(r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]").unwrap();
+
+  static RE: OnceLock<Regex> = OnceLock::new();
+  let re = RE.get_or_init(|| {
+    // Anchored: the whole bracketed tag must be a timestamp.
+    Regex::new(r"^\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]$").unwrap()
+  });
 
   let mut entries: Vec<(u32, String)> = Vec::new();
 
   for line in lrc.lines() {
-    let mut last_end = 0usize;
+    let mut pos = 0usize;
     let mut timestamps: Vec<u32> = Vec::new();
 
-    for cap in re.captures_iter(line) {
-      let whole = cap.get(0).unwrap();
-      // Timestamps must be consecutive from the start of the line;
-      // anything else is treated as text (or a metadata tag).
-      if whole.start() != last_end {
+    // Consume the leading run of `[...]` tags.
+    // Timestamp tags add timestamps; metadata/other tags are ignored.
+    while line[pos..].starts_with('[') {
+      let rest = &line[pos..];
+      let Some(close) = rest.find(']') else {
         break;
-      }
-      last_end = whole.end();
-
-      let minutes: u32 = cap[1].parse().unwrap_or(0);
-      let seconds: u32 = cap[2].parse().unwrap_or(0);
-      let millis: u32 = match cap.get(3) {
-        Some(g) => {
-          let s = g.as_str();
-          let n: u32 = s.parse().unwrap_or(0);
-          // Normalize 1/2/3-digit fractions to milliseconds.
-          match s.len() {
-            1 => n * 100,
-            2 => n * 10,
-            _ => n,
-          }
-        },
-        None => 0,
       };
 
-      timestamps.push(minutes * 60_000 + seconds * 1_000 + millis);
+      let tag = &rest[..=close];
+
+      if let Some(cap) = re.captures(tag) {
+        let minutes: u32 = cap[1].parse().unwrap_or(0);
+        let seconds: u32 = cap[2].parse().unwrap_or(0);
+
+        let millis: u32 = match cap.get(3) {
+          Some(g) => {
+            let s = g.as_str();
+            let n: u32 = s.parse().unwrap_or(0);
+
+            // Normalize 1/2/3-digit fractions to milliseconds.
+            match s.len() {
+              1 => n * 100,
+              2 => n * 10,
+              _ => n,
+            }
+          },
+          None => 0,
+        };
+
+        timestamps.push(minutes * 60_000 + seconds * 1_000 + millis);
+      }
+
+      pos += close + 1;
     }
 
     if timestamps.is_empty() {
-      // Metadata like `[ar:...]`, `[offset:...]`, or blank line.
+      // Metadata-only line, blank line, or invalid leading tag.
       continue;
     }
 
-    let text = line[last_end..].trim().to_string();
+    let text = line[pos..].trim().to_string();
+
     for ts in timestamps {
       entries.push((ts, text.clone()));
     }
@@ -242,101 +91,317 @@ fn parse_lrc(lrc: &str) -> Vec<(u32, String)> {
   entries
 }
 
-/// Presence of the two kinds of lyrics in an audio file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct LyricsPresence {
-  pub has_unsynced_lyrics: bool,
-  pub has_synced_lyrics: bool,
-}
+mod embed {
+  use super::*;
 
-/// Inspect `file` and report which kinds of lyrics are embedded.
-///
-/// The format is inferred from the extension, matching [`embed_lyrics`]:
-///
-/// * MP3 — `USLT` ⇒ unsynced, `SYLT` ⇒ synced (both can coexist).
-/// * M4A/MP4 — the single `©lyr` atom is classified by inspecting its
-///   content: if the text parses as LRC it counts as *synced*, otherwise
-///   as *unsynced*.
-/// * FLAC/Opus/OGG — `UNSYNCEDLYRICS` ⇒ unsynced; `LYRICS` is classified
-///   by content (LRC ⇒ synced, otherwise unsynced).
-/// * anything else — both flags are `false`.
-pub fn detect_lyrics(file: &Path) -> Result<LyricsPresence> {
-  let ext = file_ext(file).context("Audio file has no extension")?;
+  /// Build a lofty `BinaryFrame` containing an ID3v2.4 `SYLT` payload.
+  ///
+  /// Layout (ID3v2.4 §4.10):
+  ///
+  /// ```text
+  /// encoding         1 byte   (3 = UTF-8)
+  /// language         3 bytes  (ISO-639-2)
+  /// timestamp format 1 byte   (1 = MPEG frames, 2 = ms)
+  /// content type     1 byte   (0..=8, 1 = lyrics)
+  /// description      NUL-terminated string (in `encoding`)
+  /// [ entry ]*
+  ///   text           NUL-terminated string (in `encoding`)
+  ///   timestamp      4 bytes big-endian
+  /// ```
+  ///
+  /// `entries` must be sorted by timestamp; this function does not sort.
+  #[must_use]
+  fn build_sylt_frame(lang: &[u8; 3], entries: &[(u32, String)]) -> BinaryFrame<'static> {
+    const ENC_UTF8: u8 = 3;
+    const TS_FORMAT_MS: u8 = 2;
+    const CONTENT_TYPE_LYRICS: u8 = 1;
 
-  match ext.as_str() {
-    "mp3" => detect_lyrics_mp3(file),
-    "m4a" | "mp4" | "m4b" | "aac" => detect_lyrics_mp4(file),
-    "flac" | "opus" | "ogg" => detect_lyrics_vorbis(file),
-    // WAV / unknown: no lyrics containers are ever written, so nothing
-    // to detect.
-    _ => Ok(LyricsPresence::default()),
+    // Rough upper bound: fixed header + description + per-entry payload.
+    let mut data = Vec::with_capacity(
+      6 + b"Lyrics".len() + 1 + entries.iter().map(|(_, t)| t.len() + 1 + 4).sum::<usize>(),
+    );
+
+    data.push(ENC_UTF8);
+    data.extend_from_slice(lang);
+    data.push(TS_FORMAT_MS);
+    data.push(CONTENT_TYPE_LYRICS);
+
+    // Empty description, then NUL terminator.
+    data.push(0);
+
+    for (ts_ms, text) in entries {
+      data.extend_from_slice(text.as_bytes());
+      data.push(0); // NUL terminator for UTF-8 text
+      data.extend_from_slice(&ts_ms.to_be_bytes());
+    }
+
+    BinaryFrame::new(FrameId::new("SYLT").expect("valid constant frame id"), data)
+  }
+
+  pub fn embed_lyrics_tag(
+    plain_lyrics: Option<&str>,
+    synced_lyrics: Option<&str>,
+  ) -> impl Fn(Tag) -> Result<Tag, Infallible> {
+    move |mut tag| {
+      // Choose the richest text we have. Synced wins.
+      let maybe_synced_lyrics = match (plain_lyrics, synced_lyrics) {
+        (_, Some(lrc)) => lrc,
+        (Some(plain), None) => plain,
+        (None, None) => return Ok(tag),
+      };
+
+      if let Some(plain_lyrics) = plain_lyrics {
+        tag.insert_text(ItemKey::UnsyncLyrics, plain_lyrics.to_string());
+      }
+      tag.insert_text(ItemKey::Lyrics, maybe_synced_lyrics.to_string());
+
+      match tag.tag_type() {
+        TagType::Id3v2 => {
+          // MP3 — ID3v2.4 USLT (plain) + SYLT (synced)
+          // for id3v2 insert replaces based on id and description
+          let mut id3v2: Id3v2Tag = tag.into();
+
+          if let Some(text) = plain_lyrics {
+            id3v2.insert(
+              UnsynchronizedTextFrame::new(
+                lofty::TextEncoding::UTF8,
+                *b"eng",
+                "",
+                text.to_string(),
+              )
+              .into(),
+            );
+          }
+
+          if let Some(lrc) = synced_lyrics {
+            // Because lofty doesn't support SYLT we must reach for the id3 crate and do it ourselves.
+            let lines = parse_lrc(lrc);
+
+            id3v2.insert(build_sylt_frame(b"eng", &lines).into());
+          }
+
+          Ok(id3v2.into())
+        },
+        _ => {
+          // other formats are handled correctly by lofty itself
+          Ok(tag)
+        },
+      }
+    }
   }
 }
 
-/// MP3: `USLT` and `SYLT` are distinct frames, so this is exact.
-fn detect_lyrics_mp3(file: &Path) -> Result<LyricsPresence> {
-  let tag = id3::Tag::read_from_path(file).unwrap_or_else(|_| id3::Tag::new());
-  Ok(LyricsPresence {
-    has_unsynced_lyrics: tag.get("USLT").is_some(),
-    has_synced_lyrics: tag.get("SYLT").is_some(),
-  })
-}
+mod check_lyrics_presence {
+  use super::*;
 
-/// MP4 / M4A: only `©lyr` exists. Classify by content.
-fn detect_lyrics_mp4(file: &Path) -> Result<LyricsPresence> {
-  let tagged = Probe::open(file)
-    .with_context(|| format!("failed to open {}", file.display()))?
-    .read()
-    .with_context(|| format!("failed to read tags from {}", file.display()))?;
+  pub struct LyricsPresence {
+    pub has_unsynced_lyrics: bool,
+    pub has_synced_lyrics: bool,
+  }
 
-  let text = tagged
-    .primary_tag()
-    .and_then(|t| t.get_string(ItemKey::Lyrics));
+  pub fn lyrics_presence_from_tag(tag: &Tag) -> LyricsPresence {
+    let unsynced_lyrics = tag.get_string(ItemKey::UnsyncLyrics);
+    let has_unsynced_lyrics = unsynced_lyrics.is_some_and(|s| !s.trim().is_empty());
 
-  Ok(classify_lyrics_text(text))
-}
+    let maybe_synced_lyrics = tag.get_string(ItemKey::Lyrics);
+    let mut has_synced_lyrics = maybe_synced_lyrics
+      .map(|maybe_synced_lyrics| classify_lyrics_text(maybe_synced_lyrics).has_synced_lyrics)
+      .unwrap_or(false);
 
-/// FLAC / Opus / OGG: `UNSYNCEDLYRICS` is explicitly unsynced; `LYRICS`
-/// is classified by content (matches what `embed_vorbis` writes).
-fn detect_lyrics_vorbis(file: &Path) -> Result<LyricsPresence> {
-  let tagged = Probe::open(file)
-    .with_context(|| format!("failed to open {}", file.display()))?
-    .read()
-    .with_context(|| format!("failed to read tags from {}", file.display()))?;
+    if tag.tag_type() == TagType::Id3v2 {
+      let id3v2: Id3v2Tag = tag.clone().into();
+      has_synced_lyrics |= id3v2
+        .get(&FrameId::new("SYLT").expect("constant valid frame id"))
+        .is_some();
+    }
 
-  let tag = match tagged.primary_tag() {
-    Some(t) => t,
-    None => return Ok(LyricsPresence::default()),
-  };
+    LyricsPresence {
+      has_unsynced_lyrics,
+      has_synced_lyrics,
+    }
+  }
 
-  let unsynced = tag
-    .get_string(ItemKey::UnsyncLyrics)
-    .filter(|s| !s.trim().is_empty());
-  let lyrics = tag
-    .get_string(ItemKey::Lyrics)
-    .filter(|s| !s.trim().is_empty());
-
-  let lyrics_is_synced = lyrics.map(|s| !parse_lrc(s).is_empty()).unwrap_or(false);
-
-  Ok(LyricsPresence {
-    has_unsynced_lyrics: unsynced.is_some() || (lyrics.is_some() && !lyrics_is_synced),
-    has_synced_lyrics: lyrics_is_synced,
-  })
-}
-
-/// Shared heuristic for formats that only have a single lyrics field:
-/// if the text contains at least one LRC timestamp line, treat it as
-/// synced lyrics; otherwise as plain lyrics.
-#[must_use]
-fn classify_lyrics_text(text: Option<&str>) -> LyricsPresence {
-  match text {
-    Some(s) if !s.trim().is_empty() => {
-      let synced = !parse_lrc(s).is_empty();
-      LyricsPresence {
+  /// Shared heuristic for formats that only have a single lyrics field:
+  /// if the text contains at least one LRC timestamp line, treat it as
+  /// synced lyrics; otherwise as plain lyrics.
+  #[must_use]
+  fn classify_lyrics_text(text: &str) -> LyricsPresence {
+    if !text.trim().is_empty() {
+      let synced = !parse_lrc(text).is_empty();
+      return LyricsPresence {
         has_unsynced_lyrics: !synced,
         has_synced_lyrics: synced,
-      }
-    },
-    _ => LyricsPresence::default(),
+      };
+    }
+
+    LyricsPresence {
+      has_synced_lyrics: false,
+      has_unsynced_lyrics: false,
+    }
+  }
+}
+
+pub use check_lyrics_presence::{LyricsPresence, lyrics_presence_from_tag};
+pub use embed::embed_lyrics_tag;
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn empty_input_yields_no_entries() {
+    assert!(parse_lrc("").is_empty());
+    assert!(parse_lrc("\n\n\n").is_empty());
+    assert!(parse_lrc("   \n\t\n").is_empty());
+  }
+
+  #[test]
+  fn basic_timestamp_mm_ss() {
+    let got = parse_lrc("[00:12]hello");
+    assert_eq!(got, vec![(12_000, "hello".to_string())]);
+  }
+
+  #[test]
+  fn fraction_one_digit_is_deciseconds() {
+    let got = parse_lrc("[00:01.5]a");
+    assert_eq!(got, vec![(1_500, "a".to_string())]);
+  }
+
+  #[test]
+  fn fraction_two_digits_is_centiseconds() {
+    let got = parse_lrc("[00:01.05]a");
+    assert_eq!(got, vec![(1_050, "a".to_string())]);
+  }
+
+  #[test]
+  fn fraction_three_digits_is_milliseconds() {
+    let got = parse_lrc("[00:01.005]a");
+    assert_eq!(got, vec![(1_005, "a".to_string())]);
+  }
+
+  #[test]
+  fn colon_separated_fraction_is_accepted() {
+    // `[mm:ss:xx]` — some editors emit this instead of `[mm:ss.xx]`.
+    let got = parse_lrc("[00:01:05]a");
+    assert_eq!(got, vec![(1_050, "a".to_string())]);
+  }
+
+  #[test]
+  fn minutes_can_have_up_to_three_digits() {
+    let got = parse_lrc("[123:45.678]a");
+    assert_eq!(got, vec![(123 * 60_000 + 45_000 + 678, "a".to_string())]);
+  }
+
+  #[test]
+  fn multiple_timestamps_on_one_line_expand() {
+    let got = parse_lrc("[00:01.00][00:10.00]Chorus");
+    assert_eq!(
+      got,
+      vec![
+        (1_000, "Chorus".to_string()),
+        (10_000, "Chorus".to_string()),
+      ]
+    );
+  }
+
+  #[test]
+  fn output_is_sorted_by_timestamp() {
+    // Out-of-order input; the parser must sort.
+    let got = parse_lrc("[00:10.00]b\n[00:01.00]a\n[00:05.00][00:20.00]c");
+    assert_eq!(
+      got,
+      vec![
+        (1_000, "a".to_string()),
+        (5_000, "c".to_string()),
+        (10_000, "b".to_string()),
+        (20_000, "c".to_string()),
+      ]
+    );
+  }
+
+  #[test]
+  fn metadata_only_lines_are_skipped() {
+    let lrc = "[ar:Artist]\n[ti:Title]\n[offset:500]\n";
+    assert!(parse_lrc(lrc).is_empty());
+  }
+
+  #[test]
+  fn mixed_leading_metadata_is_discarded() {
+    // A metadata tag *after* a timestamp, still in the leading run,
+    // must be dropped without being absorbed into the text.
+    let got = parse_lrc("[ar:Artist][00:01.00][ti:Song]hello");
+    assert_eq!(got, vec![(1_000, "hello".to_string())]);
+  }
+
+  #[test]
+  fn timestamp_line_with_trailing_metadata_like_brackets_is_preserved() {
+    // Once a leading run has ended, further `[...]` are part of the
+    // text; the parser must not strip them.
+    let got = parse_lrc("[00:01.00]foo [bar] baz");
+    assert_eq!(got, vec![(1_000, "foo [bar] baz".to_string())]);
+  }
+
+  #[test]
+  fn leading_bracket_that_is_not_a_timestamp_stops_the_run() {
+    // `[chorus]` is not a metadata tag -- it looks like free text --
+    // but the parser cannot tell the difference, so it treats it as
+    // a leading tag and drops it. Everything after it becomes text.
+    let got = parse_lrc("[00:01.00][chorus]sing");
+    assert_eq!(got, vec![(1_000, "sing".to_string())]);
+  }
+
+  #[test]
+  fn unterminated_bracket_is_not_a_tag() {
+    // No closing `]`: the line has no tags at all, so it is skipped.
+    assert!(parse_lrc("[00:01.00unterminated").is_empty());
+  }
+
+  #[test]
+  fn text_is_trimmed() {
+    let got = parse_lrc("[00:01.00]   padded   ");
+    assert_eq!(got, vec![(1_000, "padded".to_string())]);
+  }
+
+  #[test]
+  fn empty_text_after_timestamp_is_allowed() {
+    // An LRC line with a timestamp and no text is a legitimate "gap"
+    // marker.
+    let got = parse_lrc("[00:01.00]");
+    assert_eq!(got, vec![(1_000, "".to_string())]);
+  }
+
+  #[test]
+  fn a_full_realistic_lrc_document() {
+    let lrc = "\
+[ar:Some Artist]
+[ti:Some Song]
+[length:03:45]
+
+[00:00.00]Intro line
+[00:05.25]First verse line
+[00:10.00][01:00.00]Repeated chorus
+[00:15.50]Second verse line
+[01:05.00]Outro
+";
+    let got = parse_lrc(lrc);
+    assert_eq!(
+      got,
+      vec![
+        (0, "Intro line".to_string()),
+        (5_250, "First verse line".to_string()),
+        (10_000, "Repeated chorus".to_string()),
+        (15_500, "Second verse line".to_string()),
+        (60_000, "Repeated chorus".to_string()),
+        (65_000, "Outro".to_string()),
+      ]
+    );
+  }
+
+  #[test]
+  fn invalid_leading_fraction_falls_back_to_zero() {
+    // A group like `[00:01.abc]` is not a valid timestamp and is
+    // therefore treated as a leading metadata tag: discarded. If
+    // nothing else tags the line, it is skipped.
+    assert!(parse_lrc("[00:01.abc]text").is_empty());
   }
 }
