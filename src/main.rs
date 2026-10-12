@@ -15,6 +15,8 @@ use clap::builder::PossibleValuesParser;
 use clap::{Arg, command, value_parser};
 use jwalk::WalkDir;
 use rayon::iter::{ParallelBridge, ParallelIterator};
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::{
   collections::BTreeSet,
   fs,
@@ -173,14 +175,16 @@ impl ProcessState {
     };
 
     // collects existing music files
-    let mut existing_songs: Vec<ExistingSongFile> = Vec::new();
+    let mut existing_songs: HashMap<String, ExistingSongFile> = HashMap::new();
     // collects existing m3u8 playlists
     let mut existing_playlists: Vec<PathBuf> = Vec::new();
 
     for entry in exiting_files {
       match entry {
         ExistingFileEntry::Playlist(p) => existing_playlists.push(p),
-        ExistingFileEntry::Song(s) => existing_songs.push(s),
+        ExistingFileEntry::Song(s) => {
+          existing_songs.insert(s.yt_id.clone(), s);
+        },
       }
     }
 
@@ -189,6 +193,7 @@ impl ProcessState {
     let mut tracked_playlists: Vec<PlaylistInfo> = Vec::new();
     let mut tracked_songs: Vec<SongInfo> = Vec::new();
 
+    // Get item information
     for url in &self.urls {
       let item_info = match download_yt_item_info(url) {
         Ok(item) => item,
@@ -214,26 +219,52 @@ impl ProcessState {
     // process all songs
     for song_info in &tracked_songs {
       let url = &song_info.url;
-      let song_path = match download_song(&self.output_folder, url, &self.download_format) {
-        Ok(song_path) => song_path,
-        Err(error) => {
-          failed_urls.push((url, error));
-          continue;
-        },
-      };
 
-      match get_lyrics_for_song_info(&lrclib, &song_info) {
-        Ok(Some(lyrics)) => {
-          let mut tagged_file = TaggedFileWithPath::open(&song_path)?;
-          if let Err(error) = tagged_file.patch_tag(embed_lyrics_tag(
-            lyrics.plain_lyrics.as_ref().map(|s| s.as_str()),
-            lyrics.synced_lyrics.as_ref().map(|s| s.as_str()),
-          )) {
-            failed_urls.push((url, error.into()));
-          }
+      let existing_file = existing_songs.get(&song_info.id);
+      let need_lyrics;
+      let song_path;
+      match existing_file {
+        None => {
+          // download the song
+          match download_song(&self.output_folder, url, &self.download_format) {
+            Ok(song_path_inner) => {
+              song_path = Cow::Owned(song_path_inner);
+            },
+            Err(error) => {
+              failed_urls.push((url, error));
+              continue;
+            },
+          };
+
+          need_lyrics = true;
         },
-        Ok(None) => info!("No lyrics found for {}", song_info.title),
-        Err(error) => failed_urls.push((url, error)),
+        Some(existing_song) => {
+          // check if we need the lyrics
+
+          // we try to fetch lyrics again if it doesn't yet have synced lyrics
+          need_lyrics = !existing_song.lyrics_presence.has_synced_lyrics;
+          song_path = Cow::Borrowed(&existing_song.file_path);
+        },
+      }
+
+      if need_lyrics {
+        // download and embed lyrics
+        match get_lyrics_for_song_info(&lrclib, &song_info) {
+          Ok(Some(lyrics)) => {
+            let mut tagged_file = TaggedFileWithPath::open(&song_path)?;
+            if let Err(error) = tagged_file.patch_tag(embed_lyrics_tag(
+              lyrics.plain_lyrics.as_ref().map(|s| s.as_str()),
+              lyrics.synced_lyrics.as_ref().map(|s| s.as_str()),
+            )) {
+              failed_urls.push((url, error.into()));
+            }
+            if let Err(error) = tagged_file.overwrite() {
+              failed_urls.push((url, error.into()));
+            }
+          },
+          Ok(None) => info!("No lyrics found for {}", song_info.title),
+          Err(error) => failed_urls.push((url, error)),
+        }
       }
     }
 

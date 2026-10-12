@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
-use std::{path::PathBuf, process::Command};
+use std::process::Command;
 use url::Url;
 
 pub enum YtItem {

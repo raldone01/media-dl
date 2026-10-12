@@ -13,7 +13,9 @@
 //! | Opus / OGG  | `UNSYNCEDLYRICS` Vorbis cmt | `LYRICS` Vorbis cmt         |
 
 use anyhow::Result;
+use lofty::config::WriteOptions;
 use lofty::id3::v2::{BinaryFrame, FrameId, Id3v2Tag, UnsynchronizedTextFrame};
+use lofty::id3::v2::{SynchronizedTextFrame, TimestampFormat};
 use lofty::tag::{ItemKey, Tag, TagType};
 use std::convert::Infallible;
 use std::sync::OnceLock;
@@ -94,50 +96,6 @@ fn parse_lrc(lrc: &str) -> Vec<(u32, String)> {
 mod embed {
   use super::*;
 
-  /// Build a lofty `BinaryFrame` containing an ID3v2.4 `SYLT` payload.
-  ///
-  /// Layout (ID3v2.4 §4.10):
-  ///
-  /// ```text
-  /// encoding         1 byte   (3 = UTF-8)
-  /// language         3 bytes  (ISO-639-2)
-  /// timestamp format 1 byte   (1 = MPEG frames, 2 = ms)
-  /// content type     1 byte   (0..=8, 1 = lyrics)
-  /// description      NUL-terminated string (in `encoding`)
-  /// [ entry ]*
-  ///   text           NUL-terminated string (in `encoding`)
-  ///   timestamp      4 bytes big-endian
-  /// ```
-  ///
-  /// `entries` must be sorted by timestamp; this function does not sort.
-  #[must_use]
-  fn build_sylt_frame(lang: &[u8; 3], entries: &[(u32, String)]) -> BinaryFrame<'static> {
-    const ENC_UTF8: u8 = 3;
-    const TS_FORMAT_MS: u8 = 2;
-    const CONTENT_TYPE_LYRICS: u8 = 1;
-
-    // Rough upper bound: fixed header + description + per-entry payload.
-    let mut data = Vec::with_capacity(
-      6 + b"Lyrics".len() + 1 + entries.iter().map(|(_, t)| t.len() + 1 + 4).sum::<usize>(),
-    );
-
-    data.push(ENC_UTF8);
-    data.extend_from_slice(lang);
-    data.push(TS_FORMAT_MS);
-    data.push(CONTENT_TYPE_LYRICS);
-
-    // Empty description, then NUL terminator.
-    data.push(0);
-
-    for (ts_ms, text) in entries {
-      data.extend_from_slice(text.as_bytes());
-      data.push(0); // NUL terminator for UTF-8 text
-      data.extend_from_slice(&ts_ms.to_be_bytes());
-    }
-
-    BinaryFrame::new(FrameId::new("SYLT").expect("valid constant frame id"), data)
-  }
-
   pub fn embed_lyrics_tag(
     plain_lyrics: Option<&str>,
     synced_lyrics: Option<&str>,
@@ -177,7 +135,23 @@ mod embed {
             // Because lofty doesn't support SYLT we must reach for the id3 crate and do it ourselves.
             let lines = parse_lrc(lrc);
 
-            id3v2.insert(build_sylt_frame(b"eng", &lines).into());
+            let sync_text_frame = SynchronizedTextFrame::new(
+              lofty::TextEncoding::UTF8,
+              *b"eng",
+              TimestampFormat::MS,
+              lofty::id3::v2::SyncTextContentType::Lyrics,
+              None,
+              lines,
+            );
+            id3v2.insert(
+              BinaryFrame::new(
+                FrameId::new("SYLT").expect("valid constant frame id"),
+                sync_text_frame
+                  .as_bytes(WriteOptions::default())
+                  .expect("valid sync text frame"),
+              )
+              .into(),
+            );
           }
 
           Ok(id3v2.into())
@@ -403,5 +377,17 @@ mod tests {
     // therefore treated as a leading metadata tag: discarded. If
     // nothing else tags the line, it is skipped.
     assert!(parse_lrc("[00:01.abc]text").is_empty());
+  }
+
+  /// https://github.com/Serial-ATA/lofty-rs/issues/745
+  #[test]
+  fn test_lofty_vorbis_comments() {
+    use lofty::ogg::tag::VorbisComments;
+
+    let mut test_vorbis = VorbisComments::new();
+    test_vorbis.insert("key".to_string(), "value".to_string());
+    let tag: Tag = test_vorbis.into();
+    let after_vorbis: VorbisComments = tag.into();
+    assert!(after_vorbis.get("key").is_some());
   }
 }
