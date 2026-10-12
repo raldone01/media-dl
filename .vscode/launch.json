@@ -8,10 +8,10 @@
       "cargo": {
         "args": [
           "build",
-          "--bin=musick-dl"
+          "--bin=media-dl"
         ],
         "filter": {
-          "name": "musick-dl",
+          "name": "media-dl",
           "kind": "bin"
         }
       },

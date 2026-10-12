@@ -38,6 +38,7 @@ mod has_tools;
 mod lofty_utils;
 mod logging;
 mod lrclib_net;
+mod m3u8;
 mod parse_id_from_yt_url;
 mod parse_yt_item_info;
 mod utils;
@@ -53,7 +54,7 @@ struct Cancelled;
 
 struct ExistingSongFile {
   file_path: PathBuf,
-  yt_id: String,
+  yt_id: String, // TODO: optional
   lyrics_presence: LyricsPresence,
 }
 

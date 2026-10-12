@@ -58,14 +58,14 @@ unused_qualifications = "warn"
 lto = "thin"
 
 [package]
-name = "musick-dl"
+name = "media-dl"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/raldone01/musick-dl"
-repository = "https://github.com/raldone01/musick-dl"
+homepage = "https://github.com/raldone01/media-dl"
+repository = "https://github.com/raldone01/media-dl"
 readme = "README.md"
-description = "Simple tool for downloading songs from youtube music!"
+description = "A simple tool for downloading songs from youtube music!"
 categories = []
 keywords = []
 
