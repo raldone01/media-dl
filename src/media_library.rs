@@ -188,6 +188,11 @@ impl MediaLibrary {
       }
     }
 
+    // TODO: run reconcile_files_to_m3u8
+    // This should copy the resource ids back into the m3u8 playlists from the files
+    // and correct playlist file names
+    // we should crash on inconsistencies
+
     Ok(Self {
       library_path,
       url_downloader: Default::default(),
@@ -215,9 +220,31 @@ impl MediaLibrary {
     let url_info = self.url_downloader.download_info(url)?;
     match url_info {
       UrlInfo::Yt(YtItem::PlaylistInfo(playlist_info)) => {
-        // ignore and log if the playlist is already part of the library
         // add a new playlist to playlists
-        todo!()
+        let playlist_is_already_part_of_playlist = self
+          .playlists
+          .iter()
+          .find(|playlist| {
+            playlist
+              .m3u8_playlist
+              .resource_id()
+              .as_ref()
+              .and_then(ResourceId::yt_id)
+              == Some(&playlist_info.id)
+          })
+          .is_some();
+
+        if !playlist_is_already_part_of_playlist {
+          let mut m3u8_playlist = M3U8Playlist::default();
+          m3u8_playlist.set_playlist_resource_id(ResourceId::YtId(playlist_info.id.clone()));
+          self.playlists.push(ExistingPlaylistFile {
+            // TODO: handle duplicate file name (playlist name might not be unique)
+            file_path: playlist_info.filesystem_safe_file_name(),
+            m3u8_playlist,
+          });
+        } else {
+          info!("{playlist_info} is already part of the media library!")
+        }
       },
       UrlInfo::Yt(YtItem::SongInfo(song_info)) => {
         // add the song to untracked_playlists if not part of them already
@@ -237,7 +264,7 @@ impl MediaLibrary {
             .m3u8_playlist
             .add_media_entry(url.clone(), format);
         } else {
-          info!("{song_info} is already part of the music library!")
+          info!("{song_info} is already part of the media library!")
         }
       },
     }

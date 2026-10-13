@@ -114,6 +114,50 @@ pub enum M3U8PlaylistParseError {
 }
 
 impl M3U8Playlist {
+  pub fn set_playlist_resource_id(&mut self, resource_id: ResourceId) {
+    // Drop any previous remote reference or untracked marker.
+    self.playlist_meta.retain(|meta| {
+      !matches!(
+        meta,
+        PlaylistMeta::PlaylistExt(
+          ExtPlaylistComment::RemotePlaylist(_) | ExtPlaylistComment::UntrackedPlaylistMarker
+        )
+      )
+    });
+
+    match resource_id {
+      ResourceId::YtId(yt_id) => {
+        self.playlist_meta.push(PlaylistMeta::PlaylistExt(
+          ExtPlaylistComment::RemotePlaylist(yt_id.to_url()),
+        ));
+      },
+      ResourceId::UnknownUrl(url) => {
+        self.playlist_meta.push(PlaylistMeta::PlaylistExt(
+          ExtPlaylistComment::RemotePlaylist(url),
+        ));
+      },
+      ResourceId::LocalFile(_) => {
+        self.playlist_meta.push(PlaylistMeta::PlaylistExt(
+          ExtPlaylistComment::UntrackedPlaylistMarker,
+        ));
+      },
+    }
+  }
+
+  #[must_use]
+  pub fn resource_id(&self) -> Option<ResourceId> {
+    let resource_id = self
+      .playlist_meta
+      .iter()
+      .find_map(|playlist_meta| match playlist_meta {
+        PlaylistMeta::PlaylistExt(ExtPlaylistComment::RemotePlaylist(url)) => {
+          Some(ResourceId::from(url))
+        },
+        _ => None,
+      });
+    resource_id
+  }
+
   pub fn deserialize(source: &str) -> Result<Self, M3U8PlaylistParseError> {
     let lines = source.lines();
 

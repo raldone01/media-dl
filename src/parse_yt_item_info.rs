@@ -1,7 +1,9 @@
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
-use std::{fmt::Display, process::Command};
+use std::{fmt::Display, path::PathBuf, process::Command};
 use url::Url;
+
+use crate::{utils::filesystem_safe_file_name, yt_id::YtId};
 
 #[derive(Clone)]
 pub enum YtItem {
@@ -11,10 +13,23 @@ pub enum YtItem {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlaylistInfo {
-  pub id: String,
+  pub id: YtId,
   pub title: String,
   pub entries: Vec<SongInfo>,
   pub playlist_count: usize,
+}
+
+impl PlaylistInfo {
+  #[must_use]
+  pub fn filesystem_safe_file_name(&self) -> PathBuf {
+    let name = filesystem_safe_file_name(&self.title);
+
+    PathBuf::from(if name.is_empty() {
+      self.id.to_string()
+    } else {
+      name
+    })
+  }
 }
 
 impl Display for PlaylistInfo {
@@ -35,7 +50,7 @@ pub struct SongInfo {
   pub artist: String,
   pub album: String,
   pub duration: usize,
-  pub id: String,
+  pub id: YtId,
   // Playlist entries carry `url`; a single-video dump carries `webpage_url`.
   #[serde(alias = "webpage_url")]
   pub url: Url,

@@ -41,11 +41,11 @@ mod logging;
 mod lrclib_net;
 mod m3u8;
 mod media_library;
-mod parse_id_from_yt_url;
 mod parse_yt_item_info;
 mod resource_id;
 mod url_downloader;
 mod utils;
+mod yt_id;
 
 const AUDIO_FILE_EXTENSIONS: &[&str] = &["mp3", "m4a", "flac", "opus", "ogg", "vorbis"];
 const FILE_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus"];
@@ -136,7 +136,7 @@ impl ProcessState {
       let lyrics_presence = lyrics_presence_from_tag(tag);
       Ok(Some(ExistingFileEntry::Song(ExistingSongFile {
         file_path,
-        yt_id,
+        yt_id: yt_id.into(),
         lyrics_presence,
       })))
     } else {
@@ -227,7 +227,7 @@ impl ProcessState {
     for song_info in &tracked_songs {
       let url = &song_info.url;
 
-      let existing_file = existing_songs.get(&song_info.id);
+      let existing_file = existing_songs.get(song_info.id.as_str());
       let need_lyrics;
       let song_path;
       match existing_file {
