@@ -1,13 +1,12 @@
 use url::Url;
 
 #[must_use]
-pub fn yt_id_from_url_str(yt_url_str: &str) -> Option<String> {
-  let url = Url::parse(yt_url_str).ok()?;
-  let host = url.host_str()?.to_ascii_lowercase();
+pub fn yt_id_from_url(yt_url: &Url) -> Option<String> {
+  let host = yt_url.host_str()?.to_ascii_lowercase();
 
   // https://youtu.be/VIDEO_ID
   if host == "youtu.be" {
-    let mut segments = url.path_segments()?;
+    let mut segments = yt_url.path_segments()?;
     return segments
       .next()
       .filter(|id| is_youtube_id(id))
@@ -18,7 +17,7 @@ pub fn yt_id_from_url_str(yt_url_str: &str) -> Option<String> {
   if host == "youtube.com" || host.ends_with(".youtube.com") {
     // https://www.youtube.com/watch?v=VIDEO_ID
     // https://music.youtube.com/watch?v=VIDEO_ID
-    if let Some((_, v)) = url.query_pairs().find(|(k, _)| k.as_ref() == "v") {
+    if let Some((_, v)) = yt_url.query_pairs().find(|(k, _)| k.as_ref() == "v") {
       if is_youtube_id(v.as_ref()) {
         return Some(v.into_owned());
       }
@@ -28,7 +27,7 @@ pub fn yt_id_from_url_str(yt_url_str: &str) -> Option<String> {
     // https://www.youtube.com/v/VIDEO_ID
     // https://www.youtube.com/shorts/VIDEO_ID
     // https://www.youtube.com/live/VIDEO_ID
-    let mut segments = url.path_segments()?;
+    let mut segments = yt_url.path_segments()?;
     if let Some(kind) = segments.next() {
       if matches!(kind, "embed" | "v" | "shorts" | "live") {
         if let Some(id) = segments.next() {
@@ -42,7 +41,7 @@ pub fn yt_id_from_url_str(yt_url_str: &str) -> Option<String> {
 
   // https://www.youtube-nocookie.com/embed/VIDEO_ID
   if host == "youtube-nocookie.com" || host.ends_with(".youtube-nocookie.com") {
-    let mut segments = url.path_segments()?;
+    let mut segments = yt_url.path_segments()?;
     if segments.next()? == "embed" {
       if let Some(id) = segments.next() {
         if is_youtube_id(id) {
@@ -53,6 +52,12 @@ pub fn yt_id_from_url_str(yt_url_str: &str) -> Option<String> {
   }
 
   None
+}
+
+#[must_use]
+pub fn yt_id_from_url_str(yt_url_str: &str) -> Option<String> {
+  let yt_url = Url::parse(yt_url_str).ok()?;
+  yt_id_from_url(&yt_url)
 }
 
 #[must_use]

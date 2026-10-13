@@ -12,10 +12,13 @@ Implement cooldowns and retries (exponential bounded backoff).
 Implement watching a cookies.txt until it is replaced with new ones.
 Ask the user to change them when it fails.
 
+TODO: reconcile functionality to fix m3u8 files based on resource_id when the user renames media files.
+It should also copy back resource_ids from the files into the m3u8 playlists
+
 Wanted log output:
 ```
 SECTION_START: Reading existing files
-SECTION_END: took <HUMAN_TIME>, Read <NUM> existing files: <NUM_SONGS> songs, <NUM_PLAYLISTS> playlists
+SECTION_END: took <HUMAN_TIME>, Read <NUM> existing files: <NUM_MEDIA> media, <NUM_PLAYLISTS> playlists
 SECTION_START: Fetching url info.
 Fetching "<URL>".
 Fetched "<URL>": playlist "<TITLE>" with <LEN> items.
@@ -26,12 +29,13 @@ Downloading "<URL>": "<TITLE>" - "<ARTIST>" (<DURATION>)
 Skipping "<URL>": "<TITLE>" - "<ARTIST>" (<DURATION>) already exists
 Fetching lyrics for "<URL>" "<TITLE>" - "<ARTIST>" (<DURATION>)
 Fetched lyrics for "<URL>" "<TITLE>" - "<ARTIST>" (<DURATION>)
-SECTION_END: took <HUMAN_TIME>, Downloaded <NUM> songs of <EXISTING_NUM>, Downloaded <NUM> lyrics, <LYRICS_PERCENT> of songs now have lyrics
+SECTION_END: took <HUMAN_TIME>, Downloaded <NUM> media of <EXISTING_NUM>, Downloaded <NUM> lyrics, <LYRICS_PERCENT> of songs now have lyrics
 SECTION_START: Updating playlists
 SECTION_END: took <HUMAN_TIME>
 SECTION_START: Final report
-Library contains <NUM> songs and <NUM> playlists.
-Downloaded <NUM> songs, <NUM> lyrics and <NUM> playlists.
+
+Library contains <NUM> media and <NUM> playlists.
+Downloaded <NUM> media, <NUM> lyrics and <NUM> playlists.
 
 * Untracked media:
        Add them to "Untracked Media.m3u8" or "Untracked Media.m3u8.media-dl".
@@ -55,6 +59,7 @@ Downloaded <NUM> songs, <NUM> lyrics and <NUM> playlists.
        Run `<binary_name> --no-network --skip-remote-download <PATH>` to suppress.
        It is missing the following files:
               * <PATH>
+              Run `<binary_name> --no-network --remove-from-playlists <PATH>` to remove the file from the playlists.
        Media status:
               * <SAME AS UNTRACKED MEDIA BUT FOR THE MEDIA ITEMS OF THE PLAYLIST>
 SECTION_END: took <HUMAN_TIME>

@@ -1,19 +1,32 @@
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
-use std::process::Command;
+use std::{fmt::Display, process::Command};
 use url::Url;
 
+#[derive(Clone)]
 pub enum YtItem {
   PlaylistInfo(PlaylistInfo),
   SongInfo(SongInfo),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PlaylistInfo {
   pub id: String,
   pub title: String,
   pub entries: Vec<SongInfo>,
   pub playlist_count: usize,
+}
+
+impl Display for PlaylistInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "Playlist \"{}\" ({}) https://youtu.be/{}",
+      self.title,
+      self.entries.len(),
+      self.id
+    )
+  }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -26,6 +39,20 @@ pub struct SongInfo {
   // Playlist entries carry `url`; a single-video dump carries `webpage_url`.
   #[serde(alias = "webpage_url")]
   pub url: Url,
+}
+
+impl Display for SongInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "Song \"{} - {}\" ({:02}:{:02}) https://youtu.be/{}",
+      self.title,
+      self.artist,
+      self.duration / 60,
+      self.duration % 60,
+      self.id
+    )
+  }
 }
 
 pub fn download_yt_item_info(url: &Url) -> Result<YtItem> {

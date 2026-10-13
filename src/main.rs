@@ -1,4 +1,4 @@
-//! Yt Music Downloader
+//! Media Downloader focusing on Yt Music
 
 use crate::download_song::download_song;
 use crate::embedded_lyrics::{LyricsPresence, embed_lyrics_tag, lyrics_presence_from_tag};
@@ -6,6 +6,7 @@ use crate::embedded_yt_id::yt_id_from_tag;
 use crate::has_tools::{has_ffmpeg, has_ffprobe};
 use crate::lofty_utils::TaggedFileWithPath;
 use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
+use crate::media_library::MediaLibrary;
 use crate::parse_yt_item_info::{PlaylistInfo, SongInfo, YtItem, download_yt_item_info};
 use crate::utils::file_ext;
 use crate::{has_tools::has_ytdlp, logging::setup_logging};
@@ -39,10 +40,14 @@ mod lofty_utils;
 mod logging;
 mod lrclib_net;
 mod m3u8;
+mod media_library;
 mod parse_id_from_yt_url;
 mod parse_yt_item_info;
+mod resource_id;
+mod url_downloader;
 mod utils;
 
+const AUDIO_FILE_EXTENSIONS: &[&str] = &["mp3", "m4a", "flac", "opus", "ogg", "vorbis"];
 const FILE_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus"];
 
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -141,6 +146,7 @@ impl ProcessState {
 
   fn download_urls(&self) -> anyhow::Result<()> {
     let lrclib = Lrclib::new(USER_AGENT).context("Failed to initialize LRCLIB client")?;
+    let media_library = MediaLibrary::new(self.output_folder.clone(), &self.should_exit)?;
 
     fs::create_dir_all(&self.output_folder).context("Failed to create output folder")?;
 
