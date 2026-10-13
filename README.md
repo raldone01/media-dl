@@ -30,28 +30,32 @@ SECTION_END: took <HUMAN_TIME>, Downloaded <NUM> songs of <EXISTING_NUM>, Downlo
 SECTION_START: Updating playlists
 SECTION_END: took <HUMAN_TIME>
 SECTION_START: Final report
-Downloaded <NUM> songs and <NUM> playlists.
-Provided URL breakdown:
-* <URL> "<TITLE>" - "<ARTIST>" (<DURATION>) (song): Is unavailable.
-* <URL> "<TITLE>" - "<ARTIST>" (<DURATION>) (song): Is unavailable but downloaded as "<PATH>".
-* <URL> "<TITLE>" (playlist): Is unavailable.
-* <URL> "<TITLE>" "<PATH>" (playlist): Is unavailable but downloaded locally.
-       It has <NUM_ENTRIES> entries.
-       It is missing the following files:
-              * <PATH>
-* <URL> "<TITLE>" (<NUM_ITEMS>) "<PATH>" (playlist):
-       Untracked media files:
-       Add `#EXTUNTRACKEDMEDIA` before to suppress.
-              * <PATH> "<TITLE>" - "<ARTIST>" (<DURATION>) (<URL if available>)
-       Errors:
-       Add `#EXTSKIPREMOTE` to suppress.
-              * <URL> "<TITLE>" - "<ARTIST>" (<DURATION>): Is unavailable.
-              * <URL> "<TITLE>" - "<ARTIST>" (<DURATION>): Failed to download with: <ERRORS>
-* Untracked playlists:
-       Add `#EXTUNTRACKEDPLAYLIST` to suppress or `#EXTTRACKEDPLAYLIST <URL>` to track.
-       * <PATH> "<TITLE>"
+Library contains <NUM> songs and <NUM> playlists.
+Downloaded <NUM> songs, <NUM> lyrics and <NUM> playlists.
+
 * Untracked media:
        Add them to "Untracked Media.m3u8" or "Untracked Media.m3u8.media-dl".
-       * <PATH> "<TITLE>" - "<ARTIST>" (<DURATION>) (song)
+       * "<PATH>" "<TITLE>" - "<ARTIST>" (<DURATION>): Is not part of any playlist.
+       Run `<binary_name> --no-network --untrack <PATH>` to suppress and mark it as a free media file.
+       * "<URL>" "<TITLE>" - "<ARTIST>" (<DURATION>): Is unavailable.
+       Run `<binary_name> --no-network --skip-remote-download <URL>` to suppress.
+       * <URL> "<TITLE>" - "<ARTIST>" (<DURATION>) (song): Is unavailable but downloaded as "<PATH>".
+       Run `<binary_name> --no-network --skip-remote-download <PATH>` to suppress.
+       * <URL> "<TITLE>" - "<ARTIST>" (<DURATION>): Failed to download with:\
+              * <ERROR>
+       Run `<binary_name> --no-network --skip-remote-download <PATH>` to suppress.
+* Untracked playlists:
+       * "<PATH>" "<TITLE>": Does not track a remote playlist.
+       Run `<binary_name> --no-network --untrack <PATH>` to suppress and mark it as local playlist.
+* Tracked playlists
+       * <URL> "<TITLE>" (playlist): Is unavailable.
+       Run `<binary_name> --no-network --skip-remote-download <URL>` to suppress.
+       * <URL> "<TITLE>" "<PATH>" (playlist): Is unavailable but downloaded locally.
+       It has <NUM_ENTRIES> entries.
+       Run `<binary_name> --no-network --skip-remote-download <PATH>` to suppress.
+       It is missing the following files:
+              * <PATH>
+       Media status:
+              * <SAME AS UNTRACKED MEDIA BUT FOR THE MEDIA ITEMS OF THE PLAYLIST>
 SECTION_END: took <HUMAN_TIME>
 ```
