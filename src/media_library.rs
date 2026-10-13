@@ -17,7 +17,7 @@ use url::Url;
 
 use crate::{
   AUDIO_FILE_EXTENSIONS,
-  embedded_lyrics::{LyricsPresence, lyrics_presence_from_tag},
+  embedded_lyrics::LyricsPresence,
   embedded_yt_id::yt_id_from_tag,
   lofty_utils::TaggedFileWithPath,
   m3u8::M3U8Playlist,
@@ -30,36 +30,44 @@ use crate::{
 #[derive(Debug)]
 struct Cancelled;
 
-struct ExistingSongFile {
+struct SongFile {
   file_path: PathBuf,
   resource_id: ResourceId,
   lyrics_presence: LyricsPresence,
 }
 
-struct ExistingPlaylistFile {
+struct PlaylistFile {
   file_path: PathBuf,
   m3u8_playlist: M3U8Playlist,
 }
 
+impl PlaylistFile {
+  pub fn overwrite(&self) -> Result<(), anyhow::Error> {
+    fs::write(&self.file_path, self.m3u8_playlist.serialize())
+      .context(format!("Error while writing {}", self.file_path.display()))?;
+    Ok(())
+  }
+}
+
 enum ExistingFileEntry {
-  Playlist(ExistingPlaylistFile),
-  UntrackedPlaylist(ExistingPlaylistFile),
-  Song(ExistingSongFile),
+  Playlist(PlaylistFile),
+  UntrackedPlaylist(PlaylistFile),
+  Song(SongFile),
 }
 
 pub struct MediaLibrary {
   library_path: PathBuf,
   url_downloader: UrlDownloader,
   /// collects existing music files
-  songs: Vec<ExistingSongFile>,
+  songs: Vec<SongFile>,
   /// collects existing m3u8 playlists
-  playlists: Vec<ExistingPlaylistFile>,
+  playlists: Vec<PlaylistFile>,
   /// collects existing m3u8 playlists for marking untracked media files
-  untracked_playlists: Vec<ExistingPlaylistFile>,
+  untracked_playlists: Vec<PlaylistFile>,
 }
 
 impl MediaLibrary {
-  fn ingest_audio_file(file_path: PathBuf) -> Result<ExistingSongFile, anyhow::Error> {
+  fn ingest_audio_file(file_path: PathBuf) -> Result<SongFile, anyhow::Error> {
     let tagged_file = TaggedFileWithPath::open(&file_path)?;
     let Some(tag) = tagged_file.tag() else {
       bail!("No tag found in the file")
@@ -67,18 +75,18 @@ impl MediaLibrary {
     let resource_id = yt_id_from_tag(tag)
       .map(|yt_id| ResourceId::YtId(yt_id))
       .unwrap_or_else(|| ResourceId::LocalFile(file_path.clone()));
-    let lyrics_presence = lyrics_presence_from_tag(tag);
-    Ok(ExistingSongFile {
+    let lyrics_presence = LyricsPresence::from_tag(tag);
+    Ok(SongFile {
       file_path,
       resource_id,
       lyrics_presence,
     })
   }
 
-  fn ingest_playlist_file(file_path: PathBuf) -> Result<ExistingPlaylistFile, anyhow::Error> {
+  fn ingest_playlist_file(file_path: PathBuf) -> Result<PlaylistFile, anyhow::Error> {
     let file_content = fs::read_to_string(&file_path)?;
     let m3u8_playlist = M3U8Playlist::deserialize(&file_content)?;
-    Ok(ExistingPlaylistFile {
+    Ok(PlaylistFile {
       file_path,
       m3u8_playlist,
     })
@@ -175,10 +183,10 @@ impl MediaLibrary {
     };
 
     // collects existing music files
-    let mut songs: Vec<ExistingSongFile> = Vec::new();
+    let mut songs: Vec<SongFile> = Vec::new();
     // collects existing m3u8 playlists
-    let mut playlists: Vec<ExistingPlaylistFile> = Vec::new();
-    let mut untracked_playlists: Vec<ExistingPlaylistFile> = Vec::new();
+    let mut playlists: Vec<PlaylistFile> = Vec::new();
+    let mut untracked_playlists: Vec<PlaylistFile> = Vec::new();
 
     for entry in exiting_files {
       match entry {
@@ -202,10 +210,10 @@ impl MediaLibrary {
     })
   }
 
-  fn untracked_playlist_mut(&mut self) -> &mut ExistingPlaylistFile {
+  fn untracked_playlist_mut(&mut self) -> &mut PlaylistFile {
     if self.untracked_playlists.is_empty() {
       let file_path = self.library_path.join("Untracked Media.m3u8.media-dl");
-      self.untracked_playlists.push(ExistingPlaylistFile {
+      self.untracked_playlists.push(PlaylistFile {
         file_path,
         m3u8_playlist: M3U8Playlist::default(),
       });
@@ -237,9 +245,14 @@ impl MediaLibrary {
         if !playlist_is_already_part_of_playlist {
           let mut m3u8_playlist = M3U8Playlist::default();
           m3u8_playlist.set_playlist_resource_id(ResourceId::YtId(playlist_info.id.clone()));
-          self.playlists.push(ExistingPlaylistFile {
+
+          let mut file_path = self
+            .library_path
+            .join(playlist_info.filesystem_safe_file_name_without_ext());
+          file_path.set_extension("m3u8");
+          self.playlists.push(PlaylistFile {
             // TODO: handle duplicate file name (playlist name might not be unique)
-            file_path: playlist_info.filesystem_safe_file_name(),
+            file_path,
             m3u8_playlist,
           });
         } else {
@@ -284,6 +297,16 @@ impl MediaLibrary {
     }
     if !url_errors.is_empty() {
       return Err(AddUrlsError { url_errors });
+    }
+    Ok(())
+  }
+
+  pub fn overwrite(&self) -> Result<(), anyhow::Error> {
+    for playlist in &self.playlists {
+      playlist.overwrite()?;
+    }
+    for untracked_playlist in &self.untracked_playlists {
+      untracked_playlist.overwrite()?;
     }
     Ok(())
   }

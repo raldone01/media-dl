@@ -173,49 +173,54 @@ mod check_lyrics_presence {
     pub has_synced_lyrics: bool,
   }
 
-  pub fn lyrics_presence_from_tag(tag: &Tag) -> LyricsPresence {
-    let unsynced_lyrics = tag.get_string(ItemKey::UnsyncLyrics);
-    let has_unsynced_lyrics = unsynced_lyrics.is_some_and(|s| !s.trim().is_empty());
+  impl LyricsPresence {
+    #[must_use]
+    pub fn from_tag(tag: &Tag) -> Self {
+      let unsynced_lyrics = tag.get_string(ItemKey::UnsyncLyrics);
+      let has_unsynced_lyrics = unsynced_lyrics.is_some_and(|s| !s.trim().is_empty());
 
-    let maybe_synced_lyrics = tag.get_string(ItemKey::Lyrics);
-    let mut has_synced_lyrics = maybe_synced_lyrics
-      .map(|maybe_synced_lyrics| classify_lyrics_text(maybe_synced_lyrics).has_synced_lyrics)
-      .unwrap_or(false);
+      let maybe_synced_lyrics = tag.get_string(ItemKey::Lyrics);
+      let mut has_synced_lyrics = maybe_synced_lyrics
+        .map(|maybe_synced_lyrics| {
+          Self::classify_lyrics_text(maybe_synced_lyrics).has_synced_lyrics
+        })
+        .unwrap_or(false);
 
-    if tag.tag_type() == TagType::Id3v2 {
-      let id3v2: Id3v2Tag = tag.clone().into();
-      has_synced_lyrics |= id3v2
-        .get(&FrameId::new("SYLT").expect("constant valid frame id"))
-        .is_some();
+      if tag.tag_type() == TagType::Id3v2 {
+        let id3v2: Id3v2Tag = tag.clone().into();
+        has_synced_lyrics |= id3v2
+          .get(&FrameId::new("SYLT").expect("constant valid frame id"))
+          .is_some();
+      }
+
+      Self {
+        has_unsynced_lyrics,
+        has_synced_lyrics,
+      }
     }
 
-    LyricsPresence {
-      has_unsynced_lyrics,
-      has_synced_lyrics,
-    }
-  }
+    /// Shared heuristic for formats that only have a single lyrics field:
+    /// if the text contains at least one LRC timestamp line, treat it as
+    /// synced lyrics; otherwise as plain lyrics.
+    #[must_use]
+    fn classify_lyrics_text(text: &str) -> Self {
+      if !text.trim().is_empty() {
+        let synced = !parse_lrc(text).is_empty();
+        return LyricsPresence {
+          has_unsynced_lyrics: !synced,
+          has_synced_lyrics: synced,
+        };
+      }
 
-  /// Shared heuristic for formats that only have a single lyrics field:
-  /// if the text contains at least one LRC timestamp line, treat it as
-  /// synced lyrics; otherwise as plain lyrics.
-  #[must_use]
-  fn classify_lyrics_text(text: &str) -> LyricsPresence {
-    if !text.trim().is_empty() {
-      let synced = !parse_lrc(text).is_empty();
-      return LyricsPresence {
-        has_unsynced_lyrics: !synced,
-        has_synced_lyrics: synced,
-      };
-    }
-
-    LyricsPresence {
-      has_synced_lyrics: false,
-      has_unsynced_lyrics: false,
+      Self {
+        has_synced_lyrics: false,
+        has_unsynced_lyrics: false,
+      }
     }
   }
 }
 
-pub use check_lyrics_presence::{LyricsPresence, lyrics_presence_from_tag};
+pub use check_lyrics_presence::LyricsPresence;
 pub use embed::embed_lyrics_tag;
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ pub struct PlaylistInfo {
 
 impl PlaylistInfo {
   #[must_use]
-  pub fn filesystem_safe_file_name(&self) -> PathBuf {
+  pub fn filesystem_safe_file_name_without_ext(&self) -> PathBuf {
     let name = filesystem_safe_file_name(&self.title);
 
     PathBuf::from(if name.is_empty() {
@@ -47,8 +47,9 @@ impl Display for PlaylistInfo {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SongInfo {
   pub title: String,
-  pub artist: String,
-  pub album: String,
+  pub artist: Option<String>,
+  pub uploader: String,
+  pub album: Option<String>,
   pub duration: usize,
   pub id: YtId,
   // Playlist entries carry `url`; a single-video dump carries `webpage_url`.
@@ -62,7 +63,7 @@ impl Display for SongInfo {
       f,
       "Song \"{} - {}\" ({:02}:{:02}) https://youtu.be/{}",
       self.title,
-      self.artist,
+      self.artist.as_ref().unwrap_or(&self.uploader),
       self.duration / 60,
       self.duration % 60,
       self.id
@@ -88,6 +89,7 @@ pub fn download_yt_item_info(url: &Url) -> Result<YtItem> {
     ));
   }
 
+  let value_debug_str = String::from_utf8(output.stdout.clone()).unwrap();
   // Parse as a generic value first so we can sniff the item kind.
   let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
 
