@@ -2,7 +2,10 @@
 
 use core::fmt;
 use std::{
+  borrow::Cow,
   collections::HashMap,
+  ffi::OsStr,
+  fmt::Display,
   fs,
   path::PathBuf,
   sync::atomic::{AtomicBool, Ordering},
@@ -10,6 +13,7 @@ use std::{
 
 use anyhow::{Context as _, bail};
 use jwalk::WalkDir;
+use lofty::tag::Accessor;
 use rayon::iter::{ParallelBridge as _, ParallelIterator as _};
 use thiserror::Error;
 use tracing::{error, info, trace};
@@ -21,10 +25,9 @@ use crate::{
   embedded_yt_id::yt_id_from_tag,
   lofty_utils::TaggedFileWithPath,
   m3u8::M3U8Playlist,
-  parse_yt_item_info::YtItem,
   resource_id::ResourceId,
-  url_downloader::{UrlDownloader, UrlInfo},
-  utils::{file_ext, file_name_as_str},
+  url_downloader::UrlDownloader,
+  utils::{file_ext, file_name_as_str, filesystem_safe_file_name},
 };
 
 #[derive(Debug)]
@@ -34,6 +37,60 @@ struct SongFile {
   file_path: PathBuf,
   resource_id: ResourceId,
   lyrics_presence: LyricsPresence,
+  title: Option<String>,
+  artist: Option<String>,
+  album: Option<String>,
+}
+
+impl SongFile {
+  fn new(file_path: PathBuf) -> Result<Self, anyhow::Error> {
+    let tagged_file = TaggedFileWithPath::open(&file_path)?;
+    let Some(tag) = tagged_file.tag() else {
+      bail!("No tag found in the file")
+    };
+    let resource_id = yt_id_from_tag(tag)
+      .map(|yt_id| ResourceId::YtMediaId(yt_id))
+      .unwrap_or_else(|| ResourceId::LocalFile(file_path.clone()));
+    let lyrics_presence = LyricsPresence::from_tag(tag);
+    let title = tag.title().map(Cow::into_owned);
+    let artist = tag.artist().map(Cow::into_owned);
+    let album = tag.album().map(Cow::into_owned);
+    Ok(Self {
+      file_path,
+      resource_id,
+      lyrics_presence,
+      title,
+      artist,
+      album,
+    })
+  }
+}
+
+impl Display for SongFile {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let title = self
+      .title
+      .as_ref()
+      .map(|title| Cow::Borrowed(title.as_str()))
+      .or_else(|| self.file_path.file_name().map(OsStr::to_string_lossy))
+      .unwrap_or_else(|| self.file_path.to_string_lossy());
+    let artist = self
+      .artist
+      .as_deref()
+      .map(|artist| format!(" - {artist}"))
+      .unwrap_or_default();
+
+    write!(
+      f,
+      "Song \"{title}{artist}\" {}",
+      self
+        .resource_id
+        .to_url()
+        .as_ref()
+        .map(Url::to_string)
+        .unwrap_or_else(|_| format!("{:?}", self.resource_id)),
+    )
+  }
 }
 
 struct PlaylistFile {
@@ -67,22 +124,6 @@ pub struct MediaLibrary {
 }
 
 impl MediaLibrary {
-  fn ingest_audio_file(file_path: PathBuf) -> Result<SongFile, anyhow::Error> {
-    let tagged_file = TaggedFileWithPath::open(&file_path)?;
-    let Some(tag) = tagged_file.tag() else {
-      bail!("No tag found in the file")
-    };
-    let resource_id = yt_id_from_tag(tag)
-      .map(|yt_id| ResourceId::YtId(yt_id))
-      .unwrap_or_else(|| ResourceId::LocalFile(file_path.clone()));
-    let lyrics_presence = LyricsPresence::from_tag(tag);
-    Ok(SongFile {
-      file_path,
-      resource_id,
-      lyrics_presence,
-    })
-  }
-
   fn ingest_playlist_file(file_path: PathBuf) -> Result<PlaylistFile, anyhow::Error> {
     let file_content = fs::read_to_string(&file_path)?;
     let m3u8_playlist = M3U8Playlist::deserialize(&file_content)?;
@@ -139,7 +180,7 @@ impl MediaLibrary {
         Self::ingest_playlist_file(file_path)?,
       )))
     } else if AUDIO_FILE_EXTENSIONS.contains(&ext.as_str()) {
-      Ok(Some(ExistingFileEntry::Song(Self::ingest_audio_file(
+      Ok(Some(ExistingFileEntry::Song(SongFile::new(
         file_path.to_owned(),
       )?)))
     } else {
@@ -224,61 +265,72 @@ impl MediaLibrary {
       .expect("pushed at least one item onto the vec")
   }
 
+  fn song_file_by_resource_id(&self, resource_id: &ResourceId) -> Option<&SongFile> {
+    let song = self
+      .songs
+      .iter()
+      .find(|song| song.resource_id == *resource_id);
+    song
+  }
+
   fn add_url(&mut self, url: &Url, format: String) -> Result<(), anyhow::Error> {
-    let url_info = self.url_downloader.download_info(url)?;
-    match url_info {
-      UrlInfo::Yt(YtItem::PlaylistInfo(playlist_info)) => {
-        // add a new playlist to playlists
-        let playlist_is_already_part_of_playlist = self
-          .playlists
-          .iter()
-          .find(|playlist| {
-            playlist
-              .m3u8_playlist
-              .resource_id()
-              .as_ref()
-              .and_then(ResourceId::yt_id)
-              == Some(&playlist_info.id)
-          })
-          .is_some();
-
-        if !playlist_is_already_part_of_playlist {
-          let mut m3u8_playlist = M3U8Playlist::default();
-          m3u8_playlist.set_playlist_resource_id(ResourceId::YtId(playlist_info.id.clone()));
-
-          let mut file_path = self
-            .library_path
-            .join(playlist_info.filesystem_safe_file_name_without_ext());
-          file_path.set_extension("m3u8");
-          self.playlists.push(PlaylistFile {
-            // TODO: handle duplicate file name (playlist name might not be unique)
-            file_path,
-            m3u8_playlist,
-          });
-        } else {
-          info!("{playlist_info} is already part of the media library!")
-        }
-      },
-      UrlInfo::Yt(YtItem::SongInfo(song_info)) => {
+    let resource_id = ResourceId::from(url);
+    let url = resource_id
+      .to_url()
+      .expect("We came from a url so we must be able to construct one again.");
+    let existing_song = self.song_file_by_resource_id(&resource_id);
+    let url_info_string = existing_song
+      .map(|existing_song| format!("{existing_song}"))
+      .unwrap_or_else(|| url.to_string());
+    match resource_id {
+      ResourceId::YtMediaId(ref yt_media_id) => {
         // add the song to untracked_playlists if not part of them already
-        let is_on_untracked_playlists = self
+        let untracked_playlist_entry = self
           .untracked_playlists
           .iter()
-          .find(|item| {
-            item
-              .m3u8_playlist
-              .find(&ResourceId::YtId(song_info.id.clone()))
-              .is_some()
-          })
-          .is_some();
-        if !is_on_untracked_playlists {
+          .find(|item| item.m3u8_playlist.find(&resource_id).is_some());
+
+        if let Some(existing_untracked_entry) = untracked_playlist_entry {
+          // already listed on an untracked playlist
+          info!("Skipped adding {url_info_string} as it is already untracked media!")
+        } else {
+          // not yet on the untracked playlists so we add it
           let untracked_playlist = self.untracked_playlist_mut();
           untracked_playlist
             .m3u8_playlist
             .add_media_entry(url.clone(), format);
-        } else {
-          info!("{song_info} is already part of the media library!")
+          info!("Added {url_info_string} as untracked media!")
         }
+      },
+      ResourceId::YtPlaylistId(ref yt_playlist_id) => {
+        // add a new playlist to playlists
+        let playlist_is_already_part_of_playlist = self
+          .playlists
+          .iter()
+          .find(|playlist| playlist.m3u8_playlist.resource_id().as_ref() == Some(&resource_id))
+          .is_some();
+
+        if !playlist_is_already_part_of_playlist {
+          let mut m3u8_playlist = M3U8Playlist::default();
+          m3u8_playlist.set_playlist_resource_id(resource_id.clone())?;
+
+          let mut file_path = self
+            .library_path
+            .join(filesystem_safe_file_name(yt_playlist_id.as_str()));
+          file_path.set_extension("m3u8");
+          self.playlists.push(PlaylistFile {
+            // TODO: handle duplicate file name another playlist with that name might already exist on disk
+            file_path,
+            m3u8_playlist,
+          });
+        } else {
+          info!(
+            "Skipped adding youtube playlist {url_info_string} as it is already part of the media library!"
+          )
+        }
+      },
+      other_resource_id => {
+        bail!("Failed to add {other_resource_id:?} to the music library!");
       },
     }
     Ok(())

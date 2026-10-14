@@ -102,7 +102,7 @@ mod embed {
 
 mod parse {
   use super::*;
-  use crate::yt_id::YtId;
+  use crate::yt_id::YtMediaId;
 
   /// Vendored from lofty
   fn filter_comment_frame_by_description<'a>(
@@ -145,7 +145,7 @@ mod parse {
   ///
   /// Returns `None` when the format is unsupported or the field is simply
   /// not present.
-  pub fn yt_id_from_tag(tag: &Tag) -> Option<YtId> {
+  pub fn yt_id_from_tag(tag: &Tag) -> Option<YtMediaId> {
     let tag = tag.clone();
 
     match tag.tag_type() {
@@ -157,7 +157,7 @@ mod parse {
 
           // read our user_text
           if let Some(user_text_frame) = filter_user_text_frame_by_description(frame, YTID_KEY) {
-            return Some(YtId::from(user_text_frame.content.to_string()));
+            return Some(YtMediaId::from(user_text_frame.content.to_string()));
           }
 
           // read our url frame
@@ -197,7 +197,7 @@ mod parse {
         // First try our own YTID freeform atom.
         if let Some(atom) = mp4.get(&YTID_KEY_MP4_ATOM) {
           if let Some(AtomData::UTF8(value)) = atom.data().next() {
-            return Some(YtId::from(value.clone()));
+            return Some(YtMediaId::from(value.clone()));
           }
         }
 
@@ -215,7 +215,7 @@ mod parse {
 
         let yt_id_comment = vorbis.get(YTID_KEY).map(str::to_owned);
         if yt_id_comment.is_some() {
-          return yt_id_comment.map(YtId::from);
+          return yt_id_comment.map(YtMediaId::from);
         }
 
         // yt-dlp adds a description entry with the url by default
@@ -232,9 +232,9 @@ mod parse {
   }
 
   #[must_use]
-  fn yt_id_from_url_str(yt_url_str: &str) -> Option<YtId> {
+  fn yt_id_from_url_str(yt_url_str: &str) -> Option<YtMediaId> {
     let yt_url = Url::parse(yt_url_str).ok()?;
-    YtId::try_from(&yt_url).ok()
+    YtMediaId::try_from(&yt_url).ok()
   }
 }
 

@@ -3,23 +3,23 @@ use serde::Deserialize;
 use std::{fmt::Display, path::PathBuf, process::Command};
 use url::Url;
 
-use crate::{utils::filesystem_safe_file_name, yt_id::YtId};
+use crate::{utils::filesystem_safe_file_name, yt_id::YtMediaId};
 
 #[derive(Clone)]
 pub enum YtItem {
-  PlaylistInfo(PlaylistInfo),
-  SongInfo(SongInfo),
+  PlaylistInfo(YtPlaylistInfo),
+  SongInfo(YtSongInfo),
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct PlaylistInfo {
-  pub id: YtId,
+pub struct YtPlaylistInfo {
+  pub id: YtMediaId,
   pub title: String,
-  pub entries: Vec<SongInfo>,
+  pub entries: Vec<YtSongInfo>,
   pub playlist_count: usize,
 }
 
-impl PlaylistInfo {
+impl YtPlaylistInfo {
   #[must_use]
   pub fn filesystem_safe_file_name_without_ext(&self) -> PathBuf {
     let name = filesystem_safe_file_name(&self.title);
@@ -32,11 +32,11 @@ impl PlaylistInfo {
   }
 }
 
-impl Display for PlaylistInfo {
+impl Display for YtPlaylistInfo {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     write!(
       f,
-      "Playlist \"{}\" ({}) https://youtu.be/{}",
+      "Playlist \"{}\" ({}) https://youtube.com/playlist?list={}",
       self.title,
       self.entries.len(),
       self.id
@@ -45,19 +45,19 @@ impl Display for PlaylistInfo {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct SongInfo {
+pub struct YtSongInfo {
   pub title: String,
   pub artist: Option<String>,
   pub uploader: String,
   pub album: Option<String>,
   pub duration: usize,
-  pub id: YtId,
+  pub id: YtMediaId,
   // Playlist entries carry `url`; a single-video dump carries `webpage_url`.
   #[serde(alias = "webpage_url")]
   pub url: Url,
 }
 
-impl Display for SongInfo {
+impl Display for YtSongInfo {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     write!(
       f,
@@ -98,11 +98,11 @@ pub fn download_yt_item_info(url: &Url) -> Result<YtItem> {
   // nested fields only). Fall back to song parsing for anything else.
   match value.get("_type").and_then(|v| v.as_str()) {
     Some("playlist") => {
-      let info: PlaylistInfo = serde_json::from_value(value)?;
+      let info: YtPlaylistInfo = serde_json::from_value(value)?;
       Ok(YtItem::PlaylistInfo(info))
     },
     _ => {
-      let info: SongInfo = serde_json::from_value(value)?;
+      let info: YtSongInfo = serde_json::from_value(value)?;
       Ok(YtItem::SongInfo(info))
     },
   }

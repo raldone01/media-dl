@@ -30,6 +30,7 @@
 
 use std::path::PathBuf;
 
+use anyhow::bail;
 use thiserror::Error;
 use url::{ParseError, Url};
 
@@ -107,14 +108,12 @@ pub enum M3U8PlaylistParseError {
   },
   #[error("media metadata without a following media entry")]
   DanglingMediaMetadata,
-  #[error("#EXTMEDIA_REMOTE requires at least one URL")]
-  RemoteMediaNoUrls,
   #[error("#EXTMEDIA_REMOTE_FORMAT requires a format value")]
   RemoteFormatMissing,
 }
 
 impl M3U8Playlist {
-  pub fn set_playlist_resource_id(&mut self, resource_id: ResourceId) {
+  pub fn set_playlist_resource_id(&mut self, resource_id: ResourceId) -> Result<(), anyhow::Error> {
     // Drop any previous remote reference or untracked marker.
     self.playlist_meta.retain(|meta| {
       !matches!(
@@ -125,8 +124,8 @@ impl M3U8Playlist {
       )
     });
 
-    match resource_id {
-      ResourceId::YtId(yt_id) => {
+    Ok(match resource_id {
+      ResourceId::YtPlaylistId(yt_id) => {
         self.playlist_meta.push(PlaylistMeta::PlaylistExt(
           ExtPlaylistComment::RemotePlaylist(yt_id.to_url()),
         ));
@@ -141,7 +140,10 @@ impl M3U8Playlist {
           ExtPlaylistComment::UntrackedPlaylistMarker,
         ));
       },
-    }
+      other_id => bail!(format!(
+        "Can't set {other_id:?} as a remote playlist source."
+      )),
+    })
   }
 
   #[must_use]

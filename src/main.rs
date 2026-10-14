@@ -6,7 +6,7 @@ use crate::has_tools::{has_ffmpeg, has_ffprobe};
 use crate::lofty_utils::TaggedFileWithPath;
 use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
 use crate::media_library::MediaLibrary;
-use crate::parse_yt_item_info::{PlaylistInfo, SongInfo, YtItem, download_yt_item_info};
+use crate::parse_yt_item_info::{YtItem, YtPlaylistInfo, YtSongInfo, download_yt_item_info};
 use crate::{has_tools::has_ytdlp, logging::setup_logging};
 use anyhow::Error;
 use anyhow::{Context, anyhow};
@@ -41,6 +41,7 @@ mod resource_id;
 mod url_downloader;
 mod utils;
 mod yt_id;
+mod yt_playlist_id;
 
 const AUDIO_FILE_EXTENSIONS: &[&str] = &["mp3", "m4a", "flac", "opus", "ogg", "vorbis"];
 const FILE_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus"];
@@ -91,8 +92,8 @@ impl ProcessState {
 
     let mut failed_urls = Vec::new();
 
-    let mut tracked_playlists: Vec<PlaylistInfo> = Vec::new();
-    let mut tracked_songs: Vec<SongInfo> = Vec::new();
+    let mut tracked_playlists: Vec<YtPlaylistInfo> = Vec::new();
+    let mut tracked_songs: Vec<YtSongInfo> = Vec::new();
 
     // Get item information
     for url in &self.urls {
@@ -183,7 +184,7 @@ impl ProcessState {
 
 fn get_lyrics_for_song_info(
   lrclib: &Lrclib,
-  song_info: &SongInfo,
+  song_info: &YtSongInfo,
 ) -> anyhow::Result<Option<Lyrics>> {
   let mut query = TrackQuery::new(&song_info.title);
   query = query.artist(song_info.artist.as_ref().unwrap());

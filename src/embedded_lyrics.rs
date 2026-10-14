@@ -168,6 +168,7 @@ mod embed {
 mod check_lyrics_presence {
   use super::*;
 
+  #[derive(Debug, Clone)]
   pub struct LyricsPresence {
     pub has_unsynced_lyrics: bool,
     pub has_synced_lyrics: bool,

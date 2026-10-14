@@ -14,16 +14,13 @@ pub enum YtIdUrlParseError {
 
   #[error("missing YouTube video ID")]
   MissingVideoId,
-
-  #[error("invalid YouTube video ID: {id:?}")]
-  InvalidVideoId { id: String },
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
 #[serde(transparent)]
-pub struct YtId(String);
+pub struct YtMediaId(String);
 
-impl YtId {
+impl YtMediaId {
   #[must_use]
   pub fn as_str(&self) -> &str {
     &self.0
@@ -41,31 +38,31 @@ impl YtId {
   }
 }
 
-impl From<String> for YtId {
+impl From<String> for YtMediaId {
   fn from(value: String) -> Self {
     Self(value)
   }
 }
 
-impl From<YtId> for String {
-  fn from(value: YtId) -> Self {
+impl From<YtMediaId> for String {
+  fn from(value: YtMediaId) -> Self {
     value.0
   }
 }
 
-impl From<YtId> for Url {
-  fn from(value: YtId) -> Self {
+impl From<YtMediaId> for Url {
+  fn from(value: YtMediaId) -> Self {
     value.to_url()
   }
 }
 
-impl Display for YtId {
+impl Display for YtMediaId {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     self.0.fmt(f)
   }
 }
 
-impl TryFrom<&Url> for YtId {
+impl TryFrom<&Url> for YtMediaId {
   type Error = YtIdUrlParseError;
 
   fn try_from(yt_url: &Url) -> Result<Self, Self::Error> {
@@ -85,17 +82,14 @@ impl TryFrom<&Url> for YtId {
 
     // https://www.youtube.com/..., https://music.youtube.com/...
     if host == "youtube.com" || host.ends_with(".youtube.com") {
-      let mut invalid_query_id = None;
-
       // https://www.youtube.com/watch?v=VIDEO_ID
       // https://music.youtube.com/watch?v=VIDEO_ID
       if let Some((_, v)) = yt_url.query_pairs().find(|(k, _)| k.as_ref() == "v") {
-        if is_youtube_id(v.as_ref()) {
-          return Ok(YtId::from(v.into_owned()));
+        if v.is_empty() {
+          return Err(YtIdUrlParseError::MissingVideoId);
         }
-        if !v.is_empty() {
-          invalid_query_id = Some(v.into_owned());
-        }
+
+        return Ok(YtMediaId::from(v.into_owned()));
       }
 
       // https://www.youtube.com/embed/VIDEO_ID
@@ -113,10 +107,7 @@ impl TryFrom<&Url> for YtId {
         }
       }
 
-      return match invalid_query_id {
-        Some(id) => Err(YtIdUrlParseError::InvalidVideoId { id }),
-        None => Err(YtIdUrlParseError::MissingVideoId),
-      };
+      return Err(YtIdUrlParseError::MissingVideoId);
     }
 
     // https://www.youtube-nocookie.com/embed/VIDEO_ID
@@ -135,20 +126,9 @@ impl TryFrom<&Url> for YtId {
   }
 }
 
-fn validate_id(id: &str) -> Result<YtId, YtIdUrlParseError> {
+fn validate_id(id: &str) -> Result<YtMediaId, YtIdUrlParseError> {
   if id.is_empty() {
-    Err(YtIdUrlParseError::MissingVideoId)
-  } else if is_youtube_id(id) {
-    Ok(YtId::from(id.to_owned()))
-  } else {
-    Err(YtIdUrlParseError::InvalidVideoId { id: id.to_owned() })
+    return Err(YtIdUrlParseError::MissingVideoId);
   }
-}
-
-#[must_use]
-fn is_youtube_id(s: &str) -> bool {
-  s.len() == 11
-    && s
-      .chars()
-      .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+  Ok(YtMediaId::from(id.to_owned()))
 }
