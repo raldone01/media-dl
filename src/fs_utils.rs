@@ -1,5 +1,6 @@
 use std::{
-  fs,
+  fs::{self, File},
+  io::{BufWriter, Write},
   path::{Path, PathBuf},
 };
 
@@ -59,11 +60,11 @@ fn unique_path(path: &Path) -> PathBuf {
 /// If both `original_file_path` and `new_file_path` are the same, this function is a no-op if `dirty_contents` is false.
 ///
 /// If `dirty_contents` is true, `contents_fn` will be invoked and written to the output file.
-pub fn write_or_rename<P: AsRef<Path>, C: AsRef<[u8]>, F: Fn() -> C>(
-  original_file_path: Option<P>,
-  new_file_path: Option<P>,
+pub fn write_or_rename(
+  original_file_path: Option<impl AsRef<Path>>,
+  new_file_path: Option<impl AsRef<Path>>,
   dirty_contents: bool,
-  contents_fn: F,
+  contents_fn: impl FnOnce(&mut dyn Write) -> Result<()>,
 ) -> Result<PathBuf> {
   let original = original_file_path.as_ref().map(|path| path.as_ref());
   let new = new_file_path.as_ref().map(|path| path.as_ref());
@@ -112,9 +113,18 @@ pub fn write_or_rename<P: AsRef<Path>, C: AsRef<[u8]>, F: Fn() -> C>(
     output.to_path_buf()
   };
 
-  let contents = contents_fn();
-  fs::write(&final_path, contents)
-    .with_context(|| format!("Failed to write file {}", final_path.display()))?;
+  {
+    let context = || format!("Failed to write file {}", final_path.display());
+    let file = File::create(&final_path).with_context(context)?;
+    let mut writer = BufWriter::new(file);
+
+    contents_fn(&mut writer).with_context(context)?;
+
+    // BufWriter only flushes on drop or on explicit `flush`. Flush
+    // explicitly so we can propagate errors (a dropped BufWriter
+    // swallows I/O failures).
+    writer.flush().with_context(context)?;
+  }
 
   if let Some(original) = original {
     if original != final_path.as_path() {

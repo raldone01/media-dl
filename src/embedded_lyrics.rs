@@ -115,7 +115,7 @@ mod embed {
 
       match tag.tag_type() {
         TagType::Id3v2 => {
-          // MP3 — ID3v2.4 USLT (plain) + SYLT (synced)
+          // MP3 - ID3v2.4 USLT (plain) + SYLT (synced)
           // for id3v2 insert replaces based on id and description
           let mut id3v2: Id3v2Tag = tag.into();
 
@@ -261,7 +261,7 @@ mod tests {
 
   #[test]
   fn colon_separated_fraction_is_accepted() {
-    // `[mm:ss:xx]` — some editors emit this instead of `[mm:ss.xx]`.
+    // `[mm:ss:xx]` - some editors emit this instead of `[mm:ss.xx]`.
     let got = parse_lrc("[00:01:05]a");
     assert_eq!(got, vec![(1_050, "a".to_string())]);
   }

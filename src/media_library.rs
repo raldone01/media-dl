@@ -1,13 +1,13 @@
 //! TODO: keep dirty paths for only rewriting playlists we changed
 
 use core::fmt;
-use std::io;
+use std::io::BufReader;
 use std::{
   borrow::Cow,
   collections::{BTreeSet, HashMap},
   ffi::OsStr,
   fs,
-  path::{Path, PathBuf},
+  path::PathBuf,
   sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -113,7 +113,7 @@ impl PlaylistFile {
       self.original_file_path.as_ref(),
       self.renamed_file_path.as_ref(),
       true,
-      || self.m3u8_playlist.serialize(),
+      |mut writer| Ok(self.m3u8_playlist.serialize(&mut writer)?),
     )?;
     Ok(())
   }
@@ -137,8 +137,10 @@ pub struct MediaLibrary {
 
 impl MediaLibrary {
   fn ingest_playlist_file(file_path: PathBuf) -> Result<PlaylistFile, anyhow::Error> {
-    let file_content = fs::read_to_string(&file_path)?;
-    let m3u8_playlist = M3U8Playlist::deserialize(&file_content)?;
+    let file = fs::File::open(&file_path)
+      .with_context(|| format!("Failed to open: {}", file_path.display()))?;
+    let mut buf_read = BufReader::new(&file);
+    let m3u8_playlist = M3U8Playlist::parse(&mut buf_read)?;
     Ok(PlaylistFile {
       original_file_path: Some(file_path),
       renamed_file_path: None,
