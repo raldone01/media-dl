@@ -1,13 +1,13 @@
 //! TODO: keep dirty paths for only rewriting playlists we changed
 
 use core::fmt;
+use std::io;
 use std::{
   borrow::Cow,
-  collections::HashMap,
+  collections::{BTreeSet, HashMap},
   ffi::OsStr,
-  fmt::Display,
   fs,
-  path::PathBuf,
+  path::{Path, PathBuf},
   sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -19,22 +19,24 @@ use thiserror::Error;
 use tracing::{error, info, trace};
 use url::Url;
 
+use crate::fs_utils::write_or_rename;
 use crate::{
   AUDIO_FILE_EXTENSIONS,
+  download_playlist_info::YtPlaylistInfo,
   embedded_lyrics::LyricsPresence,
   embedded_yt_id::yt_id_from_tag,
+  fs_utils::{file_ext, file_name_as_str, filesystem_safe_file_name},
   lofty_utils::TaggedFileWithPath,
   m3u8::M3U8Playlist,
   resource_id::ResourceId,
-  url_downloader::UrlDownloader,
-  utils::{file_ext, file_name_as_str, filesystem_safe_file_name},
 };
 
 #[derive(Debug)]
 struct Cancelled;
 
 struct SongFile {
-  file_path: PathBuf,
+  original_file_path: PathBuf,
+  renamed_file_path: Option<PathBuf>,
   resource_id: ResourceId,
   lyrics_presence: LyricsPresence,
   title: Option<String>,
@@ -56,7 +58,8 @@ impl SongFile {
     let artist = tag.artist().map(Cow::into_owned);
     let album = tag.album().map(Cow::into_owned);
     Ok(Self {
-      file_path,
+      original_file_path: file_path,
+      renamed_file_path: None,
       resource_id,
       lyrics_presence,
       title,
@@ -66,14 +69,19 @@ impl SongFile {
   }
 }
 
-impl Display for SongFile {
+impl fmt::Display for SongFile {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     let title = self
       .title
       .as_ref()
       .map(|title| Cow::Borrowed(title.as_str()))
-      .or_else(|| self.file_path.file_name().map(OsStr::to_string_lossy))
-      .unwrap_or_else(|| self.file_path.to_string_lossy());
+      .or_else(|| {
+        self
+          .original_file_path
+          .file_name()
+          .map(OsStr::to_string_lossy)
+      })
+      .unwrap_or_else(|| self.original_file_path.to_string_lossy());
     let artist = self
       .artist
       .as_deref()
@@ -94,14 +102,19 @@ impl Display for SongFile {
 }
 
 struct PlaylistFile {
-  file_path: PathBuf,
+  original_file_path: Option<PathBuf>,
+  renamed_file_path: Option<PathBuf>,
   m3u8_playlist: M3U8Playlist,
 }
 
 impl PlaylistFile {
-  pub fn overwrite(&self) -> Result<(), anyhow::Error> {
-    fs::write(&self.file_path, self.m3u8_playlist.serialize())
-      .context(format!("Error while writing {}", self.file_path.display()))?;
+  pub fn write(&self) -> Result<(), anyhow::Error> {
+    write_or_rename(
+      self.original_file_path.as_ref(),
+      self.renamed_file_path.as_ref(),
+      true,
+      || self.m3u8_playlist.serialize(),
+    )?;
     Ok(())
   }
 }
@@ -114,7 +127,6 @@ enum ExistingFileEntry {
 
 pub struct MediaLibrary {
   library_path: PathBuf,
-  url_downloader: UrlDownloader,
   /// collects existing music files
   songs: Vec<SongFile>,
   /// collects existing m3u8 playlists
@@ -128,7 +140,8 @@ impl MediaLibrary {
     let file_content = fs::read_to_string(&file_path)?;
     let m3u8_playlist = M3U8Playlist::deserialize(&file_content)?;
     Ok(PlaylistFile {
-      file_path,
+      original_file_path: Some(file_path),
+      renamed_file_path: None,
       m3u8_playlist,
     })
   }
@@ -244,7 +257,6 @@ impl MediaLibrary {
 
     Ok(Self {
       library_path,
-      url_downloader: Default::default(),
       playlists,
       songs,
       untracked_playlists,
@@ -255,7 +267,8 @@ impl MediaLibrary {
     if self.untracked_playlists.is_empty() {
       let file_path = self.library_path.join("Untracked Media.m3u8.media-dl");
       self.untracked_playlists.push(PlaylistFile {
-        file_path,
+        original_file_path: None,
+        renamed_file_path: Some(file_path),
         m3u8_playlist: M3U8Playlist::default(),
       });
     }
@@ -319,8 +332,8 @@ impl MediaLibrary {
             .join(filesystem_safe_file_name(yt_playlist_id.as_str()));
           file_path.set_extension("m3u8");
           self.playlists.push(PlaylistFile {
-            // TODO: handle duplicate file name another playlist with that name might already exist on disk
-            file_path,
+            original_file_path: None,
+            renamed_file_path: Some(file_path),
             m3u8_playlist,
           });
         } else {
@@ -353,12 +366,54 @@ impl MediaLibrary {
     Ok(())
   }
 
-  pub fn overwrite(&self) -> Result<(), anyhow::Error> {
+  pub fn download(&mut self) -> Result<(), anyhow::Error> {
+    let mut media_to_check = BTreeSet::<ResourceId>::new();
+    // update playlists and collect their media items
+    // merge with untracked media files
+    // subtract the existing files from media_to_check
+    // download all remaining items
+    // run reconcile?
+
+    for playlist in &mut self.playlists {
+      let resource_id = playlist.m3u8_playlist.resource_id();
+      match resource_id {
+        Some(ResourceId::YtPlaylistId(ref yt_playlist_id)) => {
+          // query playlist information from yt
+          let yt_playlist_info = YtPlaylistInfo::download_from_yt(yt_playlist_id);
+          // TODO: queue rename
+        },
+        Some(resource_id) => {
+          // we have resource ids which we don't know how to download
+          bail!(
+            "The playlist {} is tracking an invalid playlist remote resource {}",
+            playlist
+              .original_file_path
+              .as_ref()
+              .or(playlist.renamed_file_path.as_ref())
+              .expect("At least one fs path must be set.")
+              .display(),
+            resource_id
+              .to_url()
+              .as_ref()
+              .map(Url::to_string)
+              .unwrap_or_else(|_| format!("{resource_id:?}"))
+          )
+        },
+        None => {
+          // If the playlist doesn't track a remote, we check if that is intentional by checking skip download
+          // Then we walk the entries since the individual entries might still track remote resources.
+        },
+      }
+    }
+    todo!()
+  }
+
+  pub fn write(&self) -> Result<(), anyhow::Error> {
     for playlist in &self.playlists {
-      playlist.overwrite()?;
+      playlist.write()?;
     }
     for untracked_playlist in &self.untracked_playlists {
-      untracked_playlist.overwrite()?;
+      untracked_playlist.write()?;
     }
     Ok(())
   }

@@ -5,9 +5,8 @@
 //! # Indicates this local playlist tracks a remote playlist.
 //! #EXTPLAYLIST_REMOTE <URL>
 //! # Indicates that remote download should be skipped.
+//! # Can also be used to mark playlists that intentionally don't track a remote playlist
 //! #EXTPLAYLIST_REMOTE_SKIP_DOWNLOAD
-//! # Indicates that this playlist intentionally might not track a remote playlist.
-//! #EXTPLAYLIST_UNTRACKED
 //! song1.mp3
 //! # some comment
 //! song2.mp3
@@ -85,7 +84,6 @@ pub enum ExtPlaylistComment {
   EXTM3UMarker,
   RemotePlaylist(Url),
   SkipRemoteDownloadPlaylist,
-  UntrackedPlaylistMarker,
   UnknownExtComment(String),
 }
 
@@ -114,12 +112,12 @@ pub enum M3U8PlaylistParseError {
 
 impl M3U8Playlist {
   pub fn set_playlist_resource_id(&mut self, resource_id: ResourceId) -> Result<(), anyhow::Error> {
-    // Drop any previous remote reference or untracked marker.
+    // Drop any previous remote reference or skip download marker.
     self.playlist_meta.retain(|meta| {
       !matches!(
         meta,
         PlaylistMeta::PlaylistExt(
-          ExtPlaylistComment::RemotePlaylist(_) | ExtPlaylistComment::UntrackedPlaylistMarker
+          ExtPlaylistComment::RemotePlaylist(_) | ExtPlaylistComment::SkipRemoteDownloadPlaylist
         )
       )
     });
@@ -137,7 +135,7 @@ impl M3U8Playlist {
       },
       ResourceId::LocalFile(_) => {
         self.playlist_meta.push(PlaylistMeta::PlaylistExt(
-          ExtPlaylistComment::UntrackedPlaylistMarker,
+          ExtPlaylistComment::SkipRemoteDownloadPlaylist,
         ));
       },
       other_id => bail!(format!(
@@ -334,10 +332,6 @@ fn parse_playlist_ext(line: &str) -> Result<Option<ExtPlaylistComment>, M3U8Play
     return Ok(Some(ExtPlaylistComment::SkipRemoteDownloadPlaylist));
   }
 
-  if line.trim_end() == "#EXTPLAYLIST_UNTRACKED" {
-    return Ok(Some(ExtPlaylistComment::UntrackedPlaylistMarker));
-  }
-
   if line.trim_end() == "#EXTM3U" {
     return Ok(Some(ExtPlaylistComment::EXTM3UMarker));
   }
@@ -408,9 +402,6 @@ fn serialize_playlist_ext(out: &mut String, ext: &ExtPlaylistComment) {
     },
     ExtPlaylistComment::SkipRemoteDownloadPlaylist => {
       out.push_str("#EXTPLAYLIST_REMOTE_SKIP_DOWNLOAD\n");
-    },
-    ExtPlaylistComment::UntrackedPlaylistMarker => {
-      out.push_str("#EXTPLAYLIST_UNTRACKED\n");
     },
     ExtPlaylistComment::UnknownExtComment(c) => {
       out.push('#');

@@ -79,6 +79,8 @@ pub fn download_song(output_dir: &Path, url: &Url, format: &str) -> Result<PathB
   tagged_file.patch_tag(embed_yt_id_tag(&yt_id))?;
   tagged_file.overwrite()?;
 
+  // TODO: we can also read the tags here since it is open anyways
+
   let file_name = temp_path
     .file_name()
     .context("yt-dlp output path has no file name")?;

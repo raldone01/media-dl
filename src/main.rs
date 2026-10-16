@@ -1,15 +1,16 @@
 //! Media Downloader focusing on Yt Music
 
+use crate::download_playlist_info::YtPlaylistInfo;
 use crate::download_song::download_song;
 use crate::embedded_lyrics::{LyricsPresence, embed_lyrics_tag};
 use crate::has_tools::{has_ffmpeg, has_ffprobe};
 use crate::lofty_utils::TaggedFileWithPath;
 use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
 use crate::media_library::MediaLibrary;
-use crate::parse_yt_item_info::{YtItem, YtPlaylistInfo, YtSongInfo, download_yt_item_info};
 use crate::{has_tools::has_ytdlp, logging::setup_logging};
 use anyhow::Error;
 use anyhow::{Context, anyhow};
+use clap::ArgAction::SetFalse;
 use clap::builder::PossibleValuesParser;
 use clap::{Arg, command, value_parser};
 use std::borrow::Cow;
@@ -27,19 +28,18 @@ use std::{
 use tracing::{Level, error, info, trace};
 use url::Url;
 
+mod download_playlist_info;
 mod download_song;
 mod embedded_lyrics;
 mod embedded_yt_id;
+mod fs_utils;
 mod has_tools;
 mod lofty_utils;
 mod logging;
 mod lrclib_net;
 mod m3u8;
 mod media_library;
-mod parse_yt_item_info;
 mod resource_id;
-mod url_downloader;
-mod utils;
 mod yt_id;
 mod yt_playlist_id;
 
@@ -64,6 +64,7 @@ struct ProcessState {
   urls: BTreeSet<Url>,
   cookies: PathBuf,
   download_format: String,
+  no_network: bool,
   should_exit: AtomicBool,
 }
 
@@ -74,12 +75,14 @@ impl ProcessState {
     urls: BTreeSet<Url>,
     cookies: PathBuf,
     download_format: String,
+    no_network: bool,
   ) -> Self {
     Self {
       output_folder,
       urls,
       cookies,
       download_format,
+      no_network,
       should_exit: AtomicBool::new(false),
     }
   }
@@ -88,9 +91,9 @@ impl ProcessState {
     let lrclib = Lrclib::new(USER_AGENT).context("Failed to initialize LRCLIB client")?;
     let mut media_library = MediaLibrary::new(self.output_folder.clone(), &self.should_exit)?;
     media_library.add_urls(self.urls.iter(), &self.download_format)?;
-    media_library.overwrite()?;
+    media_library.write()?;
 
-    let mut failed_urls = Vec::new();
+    /*let mut failed_urls = Vec::new();
 
     let mut tracked_playlists: Vec<YtPlaylistInfo> = Vec::new();
     let mut tracked_songs: Vec<YtSongInfo> = Vec::new();
@@ -176,13 +179,13 @@ impl ProcessState {
 
     for (url, error) in &failed_urls {
       error!("{url} failed with {error}")
-    }
+    }*/
 
     Ok(())
   }
 }
 
-fn get_lyrics_for_song_info(
+/*fn get_lyrics_for_song_info(
   lrclib: &Lrclib,
   song_info: &YtSongInfo,
 ) -> anyhow::Result<Option<Lyrics>> {
@@ -206,7 +209,7 @@ fn get_lyrics_for_song_info(
     },
     Err(error) => Err(error).context("LRCLIB get failed"),
   }
-}
+} */
 
 fn https_url(value: &str) -> Result<Url, Error> {
   let url = Url::parse(value)?;
@@ -269,6 +272,12 @@ fn new_argparser() -> clap::Command {
         .value_parser(value_parser!(PathBuf))
         .required(true),
     )
+    .arg(
+      Arg::new("no_network")
+        .long("no-network")
+        .help("Local only operation - no network")
+        .action(SetFalse),
+    )
 }
 
 fn main() -> anyhow::Result<()> {
@@ -291,15 +300,17 @@ fn main() -> anyhow::Result<()> {
     .expect("Required argument")
     .clone();
 
+  let download_format = matches
+    .get_one::<String>("format")
+    .expect("Has a default value")
+    .clone();
+
   let cookies_txt_file = matches
     .get_one::<PathBuf>("cookies")
     .expect("Required argument")
     .clone();
 
-  let download_format = matches
-    .get_one::<String>("format")
-    .expect("Has a default value")
-    .clone();
+  let no_network = matches.get_flag("no_network");
 
   if !has_ytdlp() {
     error!("yt-dlp was not found. Make sure it is installed and in your PATH.");
@@ -319,6 +330,7 @@ fn main() -> anyhow::Result<()> {
     urls,
     cookies_txt_file,
     download_format,
+    no_network,
   ));
 
   let ctrlc_process_state = process_state.clone();
