@@ -119,6 +119,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 reqwest = { version = "0.13.5", features = ["query", "json", "blocking"] }
 lofty = "0.25.4"
 tempfile = "3.27.0"
+pathdiff = "0.2.3"
 
 [lints]
 workspace = true

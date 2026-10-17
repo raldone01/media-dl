@@ -64,7 +64,7 @@ pub fn write_or_rename(
   original_file_path: Option<impl AsRef<Path>>,
   new_file_path: Option<impl AsRef<Path>>,
   dirty_contents: bool,
-  contents_fn: impl FnOnce(&mut dyn Write) -> Result<()>,
+  contents_fn: impl FnOnce(&mut dyn Write, &Path) -> Result<()>,
 ) -> Result<PathBuf> {
   let original = original_file_path.as_ref().map(|path| path.as_ref());
   let new = new_file_path.as_ref().map(|path| path.as_ref());
@@ -118,7 +118,7 @@ pub fn write_or_rename(
     let file = File::create(&final_path).with_context(context)?;
     let mut writer = BufWriter::new(file);
 
-    contents_fn(&mut writer).with_context(context)?;
+    contents_fn(&mut writer, &final_path).with_context(context)?;
 
     // BufWriter only flushes on drop or on explicit `flush`. Flush
     // explicitly so we can propagate errors (a dropped BufWriter
@@ -134,14 +134,4 @@ pub fn write_or_rename(
   }
 
   Ok(final_path)
-}
-
-pub fn absolute_from_cwd(path: &Path) -> PathBuf {
-  if path.is_absolute() {
-    path.to_path_buf()
-  } else {
-    std::env::current_dir()
-      .expect("Failed to get the current working directory!")
-      .join(path)
-  }
 }

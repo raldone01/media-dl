@@ -1,10 +1,7 @@
 //! Media Downloader focusing on Yt Music
 
-use crate::download_playlist_info::YtPlaylistInfo;
-use crate::download_song::download_song;
-use crate::embedded_lyrics::{LyricsPresence, embed_lyrics_tag};
+use crate::embedded_lyrics::LyricsPresence;
 use crate::has_tools::{has_ffmpeg, has_ffprobe};
-use crate::lofty_utils::TaggedFileWithPath;
 use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
 use crate::media_library::MediaLibrary;
 use crate::{has_tools::has_ytdlp, logging::setup_logging};
@@ -13,8 +10,6 @@ use anyhow::{Context, anyhow};
 use clap::ArgAction::SetFalse;
 use clap::builder::PossibleValuesParser;
 use clap::{Arg, command, value_parser};
-use std::borrow::Cow;
-use std::collections::HashMap;
 use std::{
   collections::BTreeSet,
   path::PathBuf,
@@ -28,6 +23,7 @@ use std::{
 use tracing::{Level, error, info, trace};
 use url::Url;
 
+mod absolute_file_path;
 mod download_playlist_info;
 mod download_song;
 mod embedded_lyrics;

@@ -11,7 +11,7 @@ use std::{
   sync::atomic::{AtomicBool, Ordering},
 };
 
-use anyhow::{Context as _, bail};
+use anyhow::{Context as _, anyhow, bail};
 use jwalk::WalkDir;
 use lofty::tag::Accessor;
 use rayon::iter::{ParallelBridge as _, ParallelIterator as _};
@@ -19,6 +19,7 @@ use thiserror::Error;
 use tracing::{error, info, trace};
 use url::Url;
 
+use crate::absolute_file_path::AbsoluteFilePath;
 use crate::fs_utils::write_or_rename;
 use crate::{
   AUDIO_FILE_EXTENSIONS,
@@ -50,9 +51,16 @@ impl SongFile {
     let Some(tag) = tagged_file.tag() else {
       bail!("No tag found in the file")
     };
-    let resource_id = yt_id_from_tag(tag)
-      .map(|yt_id| ResourceId::YtMediaId(yt_id))
-      .unwrap_or_else(|| ResourceId::LocalFile(file_path.clone()));
+    let resource_id = yt_id_from_tag(tag).map(|yt_id| ResourceId::YtMediaId(yt_id));
+    let resource_id = match resource_id {
+      Some(resource_id) => resource_id,
+      None => {
+        let Some(absolute_file_path) = AbsoluteFilePath::new(&file_path) else {
+          bail!("{} is not a absolute path", file_path.display());
+        };
+        ResourceId::LocalFile(absolute_file_path)
+      },
+    };
     let lyrics_presence = LyricsPresence::from_tag(tag);
     let title = tag.title().map(Cow::into_owned);
     let artist = tag.artist().map(Cow::into_owned);
@@ -107,7 +115,10 @@ impl PlaylistFile {
     let file = fs::File::open(&file_path)
       .with_context(|| format!("Failed to open: {}", file_path.display()))?;
     let mut buf_read = BufReader::new(&file);
-    let m3u8_playlist = M3U8Playlist::parse(&mut buf_read)?;
+    let playlist_dir = file_path
+      .parent()
+      .ok_or_else(|| anyhow!("File {} must have a parent", file_path.display()))?;
+    let m3u8_playlist = M3U8Playlist::parse(&mut buf_read, &playlist_dir)?;
     Ok(Self {
       original_file_path: Some(file_path),
       renamed_file_path: None,
@@ -152,7 +163,16 @@ impl PlaylistFile {
       self.original_file_path.as_ref(),
       self.renamed_file_path.as_ref(),
       true,
-      |mut writer| Ok(self.m3u8_playlist.serialize(&mut writer)?),
+      |mut writer, file_path| {
+        Ok(
+          self.m3u8_playlist.serialize(
+            &mut writer,
+            &file_path
+              .parent()
+              .expect("Playlist file must have a parent"),
+          )?,
+        )
+      },
     )?;
     Ok(())
   }
@@ -441,6 +461,10 @@ impl MediaLibrary {
     }
   }
 
+  fn download_media_into_library(&mut self, resource_id: &ResourceId) -> anyhow::Result<()> {
+    Ok(())
+  }
+
   pub fn download(&mut self, format: &str) -> anyhow::Result<()> {
     // update the playlists from the remote
     for playlist in &mut self.playlists {
@@ -449,10 +473,37 @@ impl MediaLibrary {
       }
     }
 
-    let mut media_to_check = BTreeSet::<ResourceId>::new();
+    let mut media_to_download = BTreeSet::<ResourceId>::new();
     // collect all media items listed on playlists and the untracked lists
-    // subtract the existing files from media_to_check
-    // download all remaining items
+    for media_entry in self
+      .playlists
+      .iter()
+      .chain(self.untracked_playlists.iter())
+      .map(|playlist| playlist.m3u8_playlist.entries.iter())
+      .flatten()
+    {
+      media_to_download.insert(media_entry.resource_id());
+    }
+    let total_media = media_to_download.len();
+    // subtract the existing files from media_to_download and add them to media_to_check
+    let mut media_to_check = BTreeSet::<ResourceId>::new();
+    for existing_media in &self.songs {
+      let removed = media_to_download.remove(&existing_media.resource_id);
+      if removed {
+        media_to_check.insert(existing_media.resource_id.clone());
+      }
+    }
+
+    // download all remaining items (if desired)
+    for resource_id in media_to_download {
+      if let Err(error) = self.download_media_into_library(&resource_id) {
+        error!(
+          "Failed to download {}: {error}",
+          resource_id.to_url().to_string()
+        );
+      }
+    }
+    // check metadata of all downloaded items (if desired)
     // run reconcile?
     Ok(())
   }

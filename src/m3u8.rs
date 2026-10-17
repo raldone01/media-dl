@@ -31,24 +31,31 @@
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::bail;
 use thiserror::Error;
 use url::{ParseError, Url};
 
+use crate::absolute_file_path::AbsoluteFilePath;
 use crate::resource_id::ResourceId;
 
 pub enum MediaSource {
   Url(Url),
-  Path(PathBuf),
+  File(AbsoluteFilePath),
 }
 
 impl MediaSource {
-  fn parse(line: &str) -> Result<Self, M3U8PlaylistParseError> {
+  fn parse(line: &str, playlist_dir: &Path) -> Result<Self, M3U8PlaylistParseError> {
     match Url::parse(line) {
       Ok(url) if url.scheme().len() > 1 || line.contains("://") => Ok(Self::Url(url)),
-      _ => Ok(Self::Path(PathBuf::from(line))),
+      _ => {
+        let media_path = PathBuf::from(line);
+        let absolute_path = playlist_dir.join(media_path);
+        Ok(Self::File(
+          AbsoluteFilePath::new(absolute_path).expect("We made sure the path is absolute."),
+        ))
+      },
     }
   }
 }
@@ -81,9 +88,16 @@ impl MediaEntry {
       })
       .unwrap_or_else(|| match self.media_source {
         MediaSource::Url(ref url) => ResourceId::from(url),
-        MediaSource::Path(ref path) => ResourceId::LocalFile(path.to_owned()),
+        MediaSource::File(ref path) => ResourceId::LocalFile(path.to_owned()),
       });
     resource_id
+  }
+
+  pub fn remove_locally_unconfirmed(&mut self) {
+    self.meta.retain(|item| match item {
+      MediaMeta::ExtComment(ExtMediaComment::LocalAdditionMarker { confirmed: false }) => false,
+      _ => true,
+    });
   }
 }
 
@@ -290,7 +304,10 @@ impl M3U8Playlist {
   }
 
   /// Parse a playlist from any buffered byte stream.
-  pub fn parse(mut reader: impl BufRead) -> Result<Self, M3U8PlaylistParseError> {
+  pub fn parse(
+    mut reader: impl BufRead,
+    playlist_dir: &Path,
+  ) -> Result<Self, M3U8PlaylistParseError> {
     // Controls when to switch from playlist comments to media level comments.
     let mut saw_first_media_level_item = false;
 
@@ -361,7 +378,7 @@ impl M3U8Playlist {
       } else {
         // A media source line.
         saw_first_media_level_item = true;
-        let media_source = MediaSource::parse(line)?;
+        let media_source = MediaSource::parse(line, playlist_dir)?;
         entries.push(MediaEntry {
           meta: std::mem::take(&mut pending_media_meta),
           media_source,
@@ -382,7 +399,7 @@ impl M3U8Playlist {
 
   /// Serialize the playlist to any `Write` sink.
   /// The output is always UTF-8.
-  pub fn serialize(&self, mut writer: impl Write) -> io::Result<()> {
+  pub fn serialize(&self, mut writer: impl Write, playlist_dir: &Path) -> io::Result<()> {
     // The header marker is always emitted first.
     writer.write_all(b"#EXTM3U\n")?;
 
@@ -418,8 +435,13 @@ impl M3U8Playlist {
           writer.write_all(url.as_str().as_bytes())?;
           writer.write_all(b"\n")?;
         },
-        MediaSource::Path(path) => {
-          writer.write_all(path.to_string_lossy().as_bytes())?;
+        MediaSource::File(path) => {
+          writer.write_all(
+            pathdiff::diff_paths(path.as_path(), playlist_dir)
+              .unwrap_or_else(|| path.as_path().to_path_buf())
+              .to_string_lossy()
+              .as_bytes(),
+          )?;
           writer.write_all(b"\n")?;
         },
       }
@@ -432,10 +454,10 @@ impl M3U8Playlist {
   /// whole playlist as a `String`. Writing to a `Vec<u8>` cannot fail,
   /// and the output is always valid UTF-8.
   #[must_use]
-  pub fn serialize_to_string(&self) -> String {
+  pub fn serialize_to_string(&self, playlist_dir: &Path) -> String {
     let mut buf = Vec::new();
     self
-      .serialize(&mut buf)
+      .serialize(&mut buf, playlist_dir)
       .expect("writing to Vec<u8> cannot fail");
     String::from_utf8(buf).expect("m3u8 output is always valid UTF-8")
   }
@@ -477,8 +499,9 @@ impl M3U8Playlist {
     // Apply the remote order and add entries for new media.
     for remote_id in remote_playlist_items_iter {
       let remote_id = remote_id.borrow();
-      if let Some(existing) = remaining.remove(&remote_id) {
+      if let Some(mut existing) = remaining.remove(&remote_id) {
         // Already present locally; keep it (and its metadata) as-is.
+        existing.remove_locally_unconfirmed();
         new_entries.push(existing);
       } else {
         // New item: push a media entry pointing at the remote URL.

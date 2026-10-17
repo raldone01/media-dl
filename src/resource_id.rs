@@ -1,5 +1,4 @@
-use crate::{fs_utils::absolute_from_cwd, yt_id::YtMediaId, yt_playlist_id::YtPlaylistId};
-use std::path::PathBuf;
+use crate::{absolute_file_path::AbsoluteFilePath, yt_id::YtMediaId, yt_playlist_id::YtPlaylistId};
 use url::Url;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -7,7 +6,7 @@ pub enum ResourceId {
   YtMediaId(YtMediaId),
   YtPlaylistId(YtPlaylistId),
   UnknownUrl(Url),
-  LocalFile(PathBuf),
+  LocalFile(AbsoluteFilePath),
 }
 
 impl ResourceId {
@@ -32,18 +31,14 @@ impl ResourceId {
       ResourceId::YtMediaId(yt_media_id) => yt_media_id.to_url(),
       ResourceId::YtPlaylistId(yt_playlist_id) => yt_playlist_id.to_url(),
       ResourceId::UnknownUrl(url) => url.clone(),
-      ResourceId::LocalFile(file_path) => {
-        let absolute_path = absolute_from_cwd(file_path);
-        Url::from_file_path(absolute_path)
-          .expect("This can only error if the path is not absolute which we checked")
-      },
+      ResourceId::LocalFile(local_file) => local_file.to_url(),
     }
   }
 
   #[must_use]
   pub fn to_string(&self) -> String {
     match self {
-      ResourceId::LocalFile(file_path) => file_path.to_string_lossy().to_string(),
+      ResourceId::LocalFile(local_file) => local_file.as_path().to_string_lossy().to_string(),
       ResourceId::UnknownUrl(url) => url.to_string(),
       ResourceId::YtMediaId(yt_media_id) => yt_media_id.to_string(),
       ResourceId::YtPlaylistId(yt_playlist_id) => yt_playlist_id.to_string(),
