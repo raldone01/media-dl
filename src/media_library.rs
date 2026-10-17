@@ -2,6 +2,7 @@
 
 use core::fmt;
 use std::io::BufReader;
+use std::path::absolute;
 use std::time::Duration;
 use std::{
   borrow::Cow,
@@ -41,8 +42,8 @@ use crate::{
 struct Cancelled;
 
 struct SongFile {
-  original_file_path: PathBuf,
-  renamed_file_path: Option<PathBuf>,
+  original_file_path: AbsoluteFilePath,
+  renamed_file_path: Option<AbsoluteFilePath>,
   resource_id: ResourceId,
   lyrics_presence: LyricsPresence,
   title: Option<String>,
@@ -73,8 +74,10 @@ impl SongFile {
     let album = tag.album().map(Cow::into_owned);
     let duration = tagged_file.duration();
 
+    let absolute_path = AbsoluteFilePath::new(absolute(file_path)?).expect("We called absolute");
+
     Ok(Self {
-      original_file_path: file_path,
+      original_file_path: absolute_path,
       renamed_file_path: None,
       resource_id,
       lyrics_presence,
@@ -118,8 +121,9 @@ impl SongFile {
       .parent()
       .expect("File must have a parent")
       .join(PathBuf::from(file_name));
-    if new_file_path != self.original_file_path {
-      self.renamed_file_path = Some(new_file_path);
+    if new_file_path != *self.original_file_path {
+      self.renamed_file_path =
+        Some(AbsoluteFilePath::new(new_file_path).expect("We came from an absolute path"));
     }
     Ok(())
   }
@@ -189,8 +193,8 @@ impl SongFile {
 
   pub fn write(&self) -> anyhow::Result<()> {
     write_or_rename(
-      Some(&self.original_file_path),
-      self.renamed_file_path.as_ref(),
+      Some(self.original_file_path.as_path()),
+      self.renamed_file_path.as_ref().map(|p| p.as_path()),
       false,
       |_, _| panic!("Songs already exist on disk"),
     )?;
@@ -446,7 +450,7 @@ impl MediaLibrary {
           MediaSource::File(file_path) => self
             .songs
             .iter()
-            .find(|song| song.original_file_path == file_path.as_path())
+            .find(|song| song.original_file_path == *file_path)
             .map(|song| Cow::Borrowed(&song.resource_id)),
           MediaSource::Url(remote_url) => Some(Cow::Owned(ResourceId::from(remote_url))),
         };
@@ -615,6 +619,7 @@ impl MediaLibrary {
   ) -> anyhow::Result<()> {
     match resource_id {
       ResourceId::YtMediaId(yt_media_id) => {
+        info!("Downloading {}", resource_id.to_url().to_string());
         let yt_song_path = download_song(&self.library_path, &yt_media_id.to_url(), &format)?;
         let mut song_file = SongFile::new_from_disk(yt_song_path)?;
         song_file.rename_if_needed()?;
@@ -664,6 +669,7 @@ impl MediaLibrary {
     for existing_media in &self.songs {
       let removed = media_to_download.remove(&existing_media.resource_id);
       if removed {
+        info!("Skipping {}", existing_media.resource_id.to_url());
         media_to_check.insert(existing_media.resource_id.clone());
       }
     }
@@ -689,17 +695,37 @@ impl MediaLibrary {
       }
     }
 
-    // run reconcile?
-
     Ok(())
   }
 
-  pub fn write(&self) -> anyhow::Result<()> {
-    for playlist in &self.playlists {
-      playlist.write()?;
+  fn fix_playlist_media_entry_paths(&mut self) {
+    for playlist in self
+      .playlists
+      .iter_mut()
+      .chain(self.untracked_playlists.iter_mut())
+    {
+      for media_entry in &mut playlist.m3u8_playlist.entries {
+        let Some(song_file) = self
+          .songs
+          .iter_mut()
+          .find(|song| song.resource_id == media_entry.resource_id())
+        else {
+          continue;
+        };
+        let file_path = song_file
+          .renamed_file_path
+          .as_ref()
+          .unwrap_or(&song_file.original_file_path);
+        media_entry.media_source = MediaSource::File(file_path.clone());
+      }
     }
-    for untracked_playlist in &self.untracked_playlists {
-      untracked_playlist.write()?;
+  }
+
+  pub fn write(&mut self) -> anyhow::Result<()> {
+    self.fix_playlist_media_entry_paths();
+
+    for playlist in self.playlists.iter().chain(self.untracked_playlists.iter()) {
+      playlist.write()?;
     }
     for song in &self.songs {
       song.write()?;

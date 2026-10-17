@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+  ops::Deref,
+  path::{Path, PathBuf},
+};
 
 use url::Url;
 
@@ -31,5 +34,13 @@ impl AbsoluteFilePath {
   pub fn to_url(&self) -> Url {
     Url::from_file_path(&self.0)
       .expect("This can only error if the path is not absolute which we checked")
+  }
+}
+
+impl Deref for AbsoluteFilePath {
+  type Target = Path;
+
+  fn deref(&self) -> &Self::Target {
+    &self.0
   }
 }
