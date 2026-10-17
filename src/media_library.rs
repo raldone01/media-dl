@@ -2,6 +2,7 @@
 
 use core::fmt;
 use std::io::BufReader;
+use std::time::Duration;
 use std::{
   borrow::Cow,
   collections::{BTreeSet, HashMap},
@@ -21,7 +22,9 @@ use url::Url;
 
 use crate::absolute_file_path::AbsoluteFilePath;
 use crate::download_song::download_song;
+use crate::embedded_lyrics::embed_lyrics_tag;
 use crate::fs_utils::write_or_rename;
+use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
 use crate::{
   AUDIO_FILE_EXTENSIONS,
   download_playlist_info::YtPlaylistInfo,
@@ -44,6 +47,7 @@ struct SongFile {
   title: Option<String>,
   artist: Option<String>,
   album: Option<String>,
+  duration: Duration,
 }
 
 impl SongFile {
@@ -66,6 +70,8 @@ impl SongFile {
     let title = tag.title().map(Cow::into_owned);
     let artist = tag.artist().map(Cow::into_owned);
     let album = tag.album().map(Cow::into_owned);
+    let duration = tagged_file.duration();
+
     Ok(Self {
       original_file_path: file_path,
       renamed_file_path: None,
@@ -74,6 +80,7 @@ impl SongFile {
       title,
       artist,
       album,
+      duration,
     })
   }
 
@@ -101,7 +108,7 @@ impl SongFile {
   pub fn rename_if_needed(&mut self) -> anyhow::Result<()> {
     let file_ext = file_ext(&self.original_file_path)?;
     let pretty_name = self.pretty_name();
-    let file_name = filesystem_safe_file_name(&format!("{pretty_name}{file_ext}"));
+    let file_name = filesystem_safe_file_name(&format!("{pretty_name}.{file_ext}"));
     if file_name.is_empty() {
       return Ok(());
     }
@@ -113,6 +120,79 @@ impl SongFile {
     if new_file_path != self.original_file_path {
       self.renamed_file_path = Some(new_file_path);
     }
+    Ok(())
+  }
+
+  fn fetch_lyrics(&self, lrclib: &Lrclib) -> Result<Option<Lyrics>, LrcLibError> {
+    // get lyrics from lrclib
+    let Some(title) = &self.title else {
+      return Ok(None);
+    };
+    let mut query = TrackQuery::new(title);
+    if let Some(artist) = &self.artist {
+      query = query.artist(artist);
+    }
+    if let Some(album) = &self.album {
+      query = query.album(album);
+    }
+    query = query.duration(self.duration.as_secs_f64());
+
+    let lyrics = match lrclib.get(&query) {
+      Ok(lyrics) => lyrics,
+      Err(LrcLibError::NotFound) => {
+        let results = lrclib.search(&query)?;
+
+        let Some(lyrics) = results.into_iter().next() else {
+          return Ok(None);
+        };
+
+        lyrics
+      },
+      Err(error) => return Err(error),
+    };
+
+    Ok(Some(lyrics))
+  }
+
+  pub fn download_and_embed_lyrics_if_needed(&mut self, lrclib: &Lrclib) -> anyhow::Result<()> {
+    // check if we need the lyrics
+    if self.lyrics_presence.has_synced_lyrics {
+      return Ok(());
+    }
+
+    // fetch new lyrics
+    let Some(new_lyrics) = self
+      .fetch_lyrics(lrclib)
+      .context("Failed to get lyrics for {self}")?
+    else {
+      return Ok(());
+    };
+
+    // embed the lyrics into the file
+    let mut tagged_file = TaggedFileWithPath::open(&self.original_file_path)?;
+    tagged_file.patch_tag(embed_lyrics_tag(
+      new_lyrics.plain_lyrics.as_ref().map(String::as_str),
+      new_lyrics.synced_lyrics.as_ref().map(String::as_str),
+    ))?;
+    tagged_file.overwrite()?;
+
+    Ok(())
+  }
+
+  pub fn check_media_meta(&mut self, lrclib: &Lrclib) -> anyhow::Result<()> {
+    self.rename_if_needed()?;
+    self.download_and_embed_lyrics_if_needed(lrclib)?;
+    // TODO: hit the apis to get updated meta data
+    Ok(())
+  }
+
+  pub fn write(&self) -> anyhow::Result<()> {
+    write_or_rename(
+      Some(&self.original_file_path),
+      self.renamed_file_path.as_ref(),
+      false,
+      |_, _| panic!("Songs already exist on disk"),
+    )?;
     Ok(())
   }
 }
@@ -522,7 +602,7 @@ impl MediaLibrary {
     Ok(())
   }
 
-  pub fn download(&mut self, format: &str) -> anyhow::Result<()> {
+  pub fn download(&mut self, format: &str, lrclib: &Lrclib) -> anyhow::Result<()> {
     // update the playlists from the remote
     for playlist in &mut self.playlists {
       if let Err(error) = Self::update_playlist_from_remote(playlist, format) {
@@ -561,7 +641,19 @@ impl MediaLibrary {
       }
     }
     // check metadata of all downloaded items (if desired)
+    for resource_id in media_to_check {
+      let song_file = self
+        .songs
+        .iter_mut()
+        .find(|song| song.resource_id == resource_id)
+        .expect("media to check must exist on disk");
+      if let Err(error) = song_file.check_media_meta(lrclib) {
+        error!("Failed to update the metadata of {song_file}: {error}")
+      }
+    }
+
     // run reconcile?
+
     Ok(())
   }
 
@@ -571,6 +663,9 @@ impl MediaLibrary {
     }
     for untracked_playlist in &self.untracked_playlists {
       untracked_playlist.write()?;
+    }
+    for song in &self.songs {
+      song.write()?;
     }
     Ok(())
   }

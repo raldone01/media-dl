@@ -1,6 +1,7 @@
 use std::{
   error::Error,
   path::{Path, PathBuf},
+  time::Duration,
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -57,8 +58,14 @@ impl TaggedFileWithPath {
     Ok(())
   }
 
+  #[must_use]
   pub fn tag(&self) -> Option<&Tag> {
     self.tagged_file.primary_tag()
+  }
+
+  #[must_use]
+  pub fn duration(&self) -> Duration {
+    self.tagged_file.properties().duration()
   }
 
   pub fn overwrite(&self) -> Result<()> {
