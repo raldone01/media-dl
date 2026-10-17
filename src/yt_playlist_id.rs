@@ -16,7 +16,7 @@ pub enum YtPlaylistIdUrlParseError {
   MissingPlaylistId,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, PartialOrd, Ord)]
 #[serde(transparent)]
 pub struct YtPlaylistId(String);
 

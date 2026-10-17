@@ -135,3 +135,13 @@ pub fn write_or_rename(
 
   Ok(final_path)
 }
+
+pub fn absolute_from_cwd(path: &Path) -> PathBuf {
+  if path.is_absolute() {
+    path.to_path_buf()
+  } else {
+    std::env::current_dir()
+      .expect("Failed to get the current working directory!")
+      .join(path)
+  }
+}

@@ -91,6 +91,7 @@ impl ProcessState {
     let lrclib = Lrclib::new(USER_AGENT).context("Failed to initialize LRCLIB client")?;
     let mut media_library = MediaLibrary::new(self.output_folder.clone(), &self.should_exit)?;
     media_library.add_urls(self.urls.iter(), &self.download_format)?;
+    media_library.download(&self.download_format)?;
     media_library.write()?;
 
     /*let mut failed_urls = Vec::new();

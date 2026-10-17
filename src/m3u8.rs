@@ -21,11 +21,15 @@
 //! #EXTMEDIA_REMOTE <URL>
 //! # Indicates which format the media should be downloaded as.
 //! #EXTMEDIA_REMOTE_FORMAT <FORMAT>
+//! # Indicates that this local addition has not been confirmed by the user
+//! #EXTMEDIA_LOCAL_ADDITION UNCONFIRMED
 //! song4.opus
 //! ```
 //!
 //! TODO: make sure repeated files are handled properly
 
+use std::borrow::Borrow;
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -119,7 +123,7 @@ impl ExtPlaylistComment {
 
 /// media-level #EXT...
 pub enum ExtMediaComment {
-  LocalAdditionMarker,
+  LocalAdditionMarker { confirmed: bool },
   SkipRemoteDownloadMarker,
   RemoteMedia(Url),
   RemoteFormat(String),
@@ -129,8 +133,12 @@ pub enum ExtMediaComment {
 impl ExtMediaComment {
   fn serialize(&self, out: &mut impl Write) -> io::Result<()> {
     match self {
-      Self::LocalAdditionMarker => {
-        writeln!(out, "#EXTMEDIA_LOCAL_ADDITION")?;
+      Self::LocalAdditionMarker { confirmed } => {
+        write!(out, "#EXTMEDIA_LOCAL_ADDITION")?;
+        if !confirmed {
+          write!(out, " UNCONFIRMED")?;
+        }
+        writeln!(out, "")?;
       },
       Self::SkipRemoteDownloadMarker => {
         writeln!(out, "#EXTMEDIA_REMOTE_SKIP_DOWNLOAD")?;
@@ -156,8 +164,18 @@ impl ExtMediaComment {
   /// Unknown `#EXTMEDIA_*` tags are captured as
   /// [`ExtMediaComment::UnknownExtComment`] so they round-trip untouched.
   fn parse(line: &str) -> Result<Option<Self>, M3U8PlaylistParseError> {
-    if line.trim_end() == "#EXTMEDIA_LOCAL_ADDITION" {
-      return Ok(Some(Self::LocalAdditionMarker));
+    if let Some(rest) = line.strip_prefix("#EXTMEDIA_LOCAL_ADDITION") {
+      if rest.chars().next().map_or(false, char::is_whitespace) {
+        match rest.trim() {
+          "" => return Ok(Some(Self::LocalAdditionMarker { confirmed: true })),
+          "UNCONFIRMED" => return Ok(Some(Self::LocalAdditionMarker { confirmed: false })),
+          other => {
+            return Err(M3U8PlaylistParseError::InvalidLocalAddition {
+              value: other.to_string(),
+            });
+          },
+        }
+      }
     }
 
     if line.trim_end() == "#EXTMEDIA_REMOTE_SKIP_DOWNLOAD" {
@@ -211,6 +229,8 @@ pub enum M3U8PlaylistParseError {
   DanglingMediaMetadata,
   #[error("#EXTMEDIA_REMOTE_FORMAT requires a format value")]
   RemoteFormatMissing,
+  #[error("invalid #EXTMEDIA_LOCAL_ADDITION value: {value:?}")]
+  InvalidLocalAddition { value: String },
   /// Two instances of a tag that may only appear once (per playlist /
   /// per entry) disagreed with each other.
   #[error("conflicting {tag} values: first {first:?}, then {second:?}")]
@@ -222,7 +242,7 @@ pub enum M3U8PlaylistParseError {
 }
 
 impl M3U8Playlist {
-  pub fn set_playlist_resource_id(&mut self, resource_id: ResourceId) -> Result<(), anyhow::Error> {
+  pub fn set_playlist_resource_id(&mut self, resource_id: ResourceId) -> anyhow::Result<()> {
     // Drop any previous remote reference or skip download marker.
     self.playlist_meta.retain(|meta| {
       !matches!(
@@ -437,6 +457,65 @@ impl M3U8Playlist {
       ],
     });
   }
+
+  pub fn update_playlist_from_remote<I, R>(&mut self, remote_playlist_items: I, format: &str)
+  where
+    I: IntoIterator<Item = R>,
+    R: Borrow<ResourceId>,
+  {
+    // Take all existing entries so we can re-order them and detect local additions.
+    let old_entries = std::mem::take(&mut self.entries);
+    let mut remaining: BTreeMap<ResourceId, MediaEntry> = old_entries
+      .into_iter()
+      .map(|entry| (entry.resource_id(), entry))
+      .collect();
+
+    let remote_playlist_items_iter = remote_playlist_items.into_iter();
+    let mut new_entries =
+      Vec::with_capacity(remote_playlist_items_iter.size_hint().0 + remaining.len());
+
+    // Apply the remote order and add entries for new media.
+    for remote_id in remote_playlist_items_iter {
+      let remote_id = remote_id.borrow();
+      if let Some(existing) = remaining.remove(&remote_id) {
+        // Already present locally; keep it (and its metadata) as-is.
+        new_entries.push(existing);
+      } else {
+        // New item: push a media entry pointing at the remote URL.
+        let remote_url = remote_id.to_url();
+        let mut meta = vec![MediaMeta::ExtComment(ExtMediaComment::RemoteMedia(
+          remote_url.clone(),
+        ))];
+        meta.push(MediaMeta::ExtComment(ExtMediaComment::RemoteFormat(
+          format.to_string(),
+        )));
+        new_entries.push(MediaEntry {
+          meta,
+          media_source: MediaSource::Url(remote_url),
+        });
+      }
+    }
+
+    // Anything left in `remaining` is a local addition. We don't
+    // remove those items; we just mark them and append them after
+    // the remote entries.
+    for (_resource_id, mut entry) in remaining {
+      let already_marked = entry.meta.iter().any(|meta| {
+        matches!(
+          meta,
+          MediaMeta::ExtComment(ExtMediaComment::LocalAdditionMarker { .. })
+        )
+      });
+      if !already_marked {
+        entry.meta.push(MediaMeta::ExtComment(
+          ExtMediaComment::LocalAdditionMarker { confirmed: false },
+        ));
+      }
+      new_entries.push(entry);
+    }
+
+    self.entries = new_entries;
+  }
 }
 
 /// Reattach trailing pending media metadata to the playlist.
@@ -567,15 +646,35 @@ fn push_media_ext_checked(
         }
       }
     },
-    ExtMediaComment::LocalAdditionMarker => {
-      let already = pending_media_meta.iter().any(|m| {
-        matches!(
-          m,
-          MediaMeta::ExtComment(ExtMediaComment::LocalAdditionMarker)
-        )
-      });
-      if already {
-        return Ok(());
+    ExtMediaComment::LocalAdditionMarker { confirmed } => {
+      for existing in pending_media_meta.iter() {
+        if let MediaMeta::ExtComment(ExtMediaComment::LocalAdditionMarker {
+          confirmed: old_confirmed,
+        }) = existing
+        {
+          if old_confirmed == confirmed {
+            return Ok(());
+          }
+
+          let first = (if *old_confirmed {
+            "CONFIRMED"
+          } else {
+            "UNCONFIRMED"
+          })
+          .to_string();
+          let second = (if *confirmed {
+            "CONFIRMED"
+          } else {
+            "UNCONFIRMED"
+          })
+          .to_string();
+
+          return Err(M3U8PlaylistParseError::ConflictingExtTag {
+            tag: "#EXTMEDIA_LOCAL_ADDITION",
+            first,
+            second,
+          });
+        }
       }
     },
     ExtMediaComment::SkipRemoteDownloadMarker => {

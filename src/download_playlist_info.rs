@@ -49,17 +49,6 @@ impl YtPlaylistInfo {
     let playlist_info = serde_json::from_slice::<Self>(&output.stdout)?;
     Ok(playlist_info)
   }
-
-  #[must_use]
-  pub fn filesystem_safe_file_name_without_ext(&self) -> PathBuf {
-    let name = filesystem_safe_file_name(&self.title);
-
-    PathBuf::from(if name.is_empty() {
-      self.id.to_string()
-    } else {
-      name
-    })
-  }
 }
 
 impl Display for YtPlaylistInfo {
