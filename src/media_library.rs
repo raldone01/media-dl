@@ -20,6 +20,7 @@ use tracing::{error, info, trace};
 use url::Url;
 
 use crate::absolute_file_path::AbsoluteFilePath;
+use crate::download_song::download_song;
 use crate::fs_utils::write_or_rename;
 use crate::{
   AUDIO_FILE_EXTENSIONS,
@@ -46,7 +47,7 @@ struct SongFile {
 }
 
 impl SongFile {
-  fn new(file_path: PathBuf) -> anyhow::Result<Self> {
+  pub fn new_from_disk(file_path: PathBuf) -> anyhow::Result<Self> {
     let tagged_file = TaggedFileWithPath::open(&file_path)?;
     let Some(tag) = tagged_file.tag() else {
       bail!("No tag found in the file")
@@ -75,10 +76,8 @@ impl SongFile {
       album,
     })
   }
-}
 
-impl fmt::Display for SongFile {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn pretty_name(&self) -> String {
     let title = self
       .title
       .as_ref()
@@ -96,9 +95,35 @@ impl fmt::Display for SongFile {
       .map(|artist| format!(" - {artist}"))
       .unwrap_or_default();
 
+    format!("{title}{artist}")
+  }
+
+  pub fn rename_if_needed(&mut self) -> anyhow::Result<()> {
+    let file_ext = file_ext(&self.original_file_path)?;
+    let pretty_name = self.pretty_name();
+    let file_name = filesystem_safe_file_name(&format!("{pretty_name}{file_ext}"));
+    if file_name.is_empty() {
+      return Ok(());
+    }
+    let new_file_path = self
+      .original_file_path
+      .parent()
+      .expect("File must have a parent")
+      .join(PathBuf::from(file_name));
+    if new_file_path != self.original_file_path {
+      self.renamed_file_path = Some(new_file_path);
+    }
+    Ok(())
+  }
+}
+
+impl fmt::Display for SongFile {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let pretty_name = self.pretty_name();
+
     write!(
       f,
-      "Song \"{title}{artist}\" {}",
+      "Song \"{pretty_name}\" {}",
       self.resource_id.to_url().to_string(),
     )
   }
@@ -264,7 +289,9 @@ impl MediaLibrary {
         PlaylistFile::new_from_disk(file_path)?,
       )))
     } else if AUDIO_FILE_EXTENSIONS.contains(&ext.as_str()) {
-      Ok(Some(ExistingFileEntry::Song(SongFile::new(file_path)?)))
+      Ok(Some(ExistingFileEntry::Song(SongFile::new_from_disk(
+        file_path,
+      )?)))
     } else {
       Ok(None)
     }
@@ -401,8 +428,11 @@ impl MediaLibrary {
           )
         }
       },
-      other_resource_id => {
-        bail!("Failed to add {other_resource_id:?} to the music library!");
+      _ => {
+        bail!(
+          "Failed to add {} to the music library!",
+          resource_id.to_url().to_string()
+        );
       },
     }
     Ok(())
@@ -461,7 +491,34 @@ impl MediaLibrary {
     }
   }
 
-  fn download_media_into_library(&mut self, resource_id: &ResourceId) -> anyhow::Result<()> {
+  fn download_media_into_library(
+    &mut self,
+    resource_id: &ResourceId,
+    format: &str,
+  ) -> anyhow::Result<()> {
+    match resource_id {
+      ResourceId::YtMediaId(yt_media_id) => {
+        let yt_song_path = download_song(&self.library_path, &yt_media_id.to_url(), &format)?;
+        let mut song_file = SongFile::new_from_disk(yt_song_path)?;
+        song_file.rename_if_needed()?;
+        self.songs.push(song_file);
+      },
+      ResourceId::LocalFile(..) => {
+        // no-op
+      },
+      ResourceId::YtPlaylistId(..) => {
+        bail!(
+          "Playlists are not accepted when downloading media items: {}",
+          resource_id.to_url().to_string()
+        )
+      },
+      _ => {
+        bail!(
+          "Don't know how to download media item: {}",
+          resource_id.to_url().to_string()
+        )
+      },
+    }
     Ok(())
   }
 
@@ -496,7 +553,7 @@ impl MediaLibrary {
 
     // download all remaining items (if desired)
     for resource_id in media_to_download {
-      if let Err(error) = self.download_media_into_library(&resource_id) {
+      if let Err(error) = self.download_media_into_library(&resource_id, &format) {
         error!(
           "Failed to download {}: {error}",
           resource_id.to_url().to_string()

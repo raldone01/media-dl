@@ -14,12 +14,13 @@ pub fn file_name_as_str(file: &Path) -> Result<String> {
     .context("failed to convert path to str")
 }
 
+/// Returns the file extension without the dot.
 pub fn file_ext(file: &Path) -> Result<String> {
   file
     .extension()
     .and_then(|s| s.to_str())
     .map(str::to_ascii_lowercase)
-    .context("audio file has no extension")
+    .context("file has no extension")
 }
 
 #[must_use]
