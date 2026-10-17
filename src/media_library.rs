@@ -25,6 +25,7 @@ use crate::download_song::download_song;
 use crate::embedded_lyrics::embed_lyrics_tag;
 use crate::fs_utils::write_or_rename;
 use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
+use crate::m3u8::MediaSource;
 use crate::{
   AUDIO_FILE_EXTENSIONS,
   download_playlist_info::YtPlaylistInfo,
@@ -163,7 +164,7 @@ impl SongFile {
     // fetch new lyrics
     let Some(new_lyrics) = self
       .fetch_lyrics(lrclib)
-      .context("Failed to get lyrics for {self}")?
+      .context(format!("Failed to get lyrics for {self}"))?
     else {
       return Ok(());
     };
@@ -426,17 +427,53 @@ impl MediaLibrary {
       }
     }
 
-    // TODO: run reconcile_files_to_m3u8
-    // This should copy the resource ids back into the m3u8 playlists from the files
-    // and correct playlist file names
-    // we should crash on inconsistencies
-
-    Ok(Self {
+    let mut selv = Self {
       library_path,
       playlists,
       songs,
       untracked_playlists,
-    })
+    };
+
+    selv.startup_playlist_consistency()?;
+
+    Ok(selv)
+  }
+
+  fn startup_playlist_consistency(&mut self) -> anyhow::Result<()> {
+    for playlist in self.playlists.iter_mut() {
+      for media_item in playlist.m3u8_playlist.entries.iter_mut() {
+        let media_entry_pointed_resource_id = match &media_item.media_source {
+          MediaSource::File(file_path) => self
+            .songs
+            .iter()
+            .find(|song| song.original_file_path == file_path.as_path())
+            .map(|song| Cow::Borrowed(&song.resource_id)),
+          MediaSource::Url(remote_url) => Some(Cow::Owned(ResourceId::from(remote_url))),
+        };
+        let remote_resource_id = media_item.remote_resource_id();
+        match (media_entry_pointed_resource_id, remote_resource_id) {
+          (Some(media_entry_pointed_resource_id), Some(remote_resource_id)) => {
+            if *media_entry_pointed_resource_id != remote_resource_id {
+              bail!(
+                "Inconsistency in playlist {playlist}: entry pointed resource id {}, entry remote resource id tag {}",
+                media_entry_pointed_resource_id.to_url().to_string(),
+                remote_resource_id.to_url().to_string()
+              )
+            }
+          },
+          (Some(media_entry_pointed_resource_id), None) => {
+            media_item.set_remote_resource_id(&media_entry_pointed_resource_id);
+          },
+          (None, Some(_remote_resource_id)) => {
+            // fine, just means we didn't download a remote media entry yet.
+          },
+          (None, None) => {
+            // broken path, checked later for the final report
+          },
+        }
+      }
+    }
+    Ok(())
   }
 
   fn untracked_playlist_mut(&mut self) -> &mut PlaylistFile {

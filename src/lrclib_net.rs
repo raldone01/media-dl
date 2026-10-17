@@ -190,7 +190,9 @@ impl Lrclib {
         return Err(LrcLibError::NotFound);
       }
 
-      if response.status() == StatusCode::TOO_MANY_REQUESTS {
+      if response.status() == StatusCode::TOO_MANY_REQUESTS
+        || response.status() == StatusCode::SERVICE_UNAVAILABLE
+      {
         let retry_after = parse_retry_after(response.headers())?;
         let delay = retry_after.unwrap_or_else(|| {
           // Exponential backoff with a small upper bound.

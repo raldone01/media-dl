@@ -80,12 +80,7 @@ impl MediaEntry {
   #[must_use]
   pub fn resource_id(&self) -> ResourceId {
     let resource_id = self
-      .meta
-      .iter()
-      .find_map(|item| match item {
-        MediaMeta::ExtComment(ExtMediaComment::RemoteMedia(url)) => Some(ResourceId::from(url)),
-        _ => None,
-      })
+      .remote_resource_id()
       .unwrap_or_else(|| match self.media_source {
         MediaSource::Url(ref url) => ResourceId::from(url),
         MediaSource::File(ref path) => ResourceId::LocalFile(path.to_owned()),
@@ -98,6 +93,33 @@ impl MediaEntry {
       MediaMeta::ExtComment(ExtMediaComment::LocalAdditionMarker { confirmed: false }) => false,
       _ => true,
     });
+  }
+
+  pub fn set_remote_resource_id(&mut self, resource_id: &ResourceId) {
+    let url = resource_id.to_url();
+
+    if let Some(MediaMeta::ExtComment(ExtMediaComment::RemoteMedia(existing))) =
+      self.meta.iter_mut().find(|item| {
+        matches!(
+          item,
+          MediaMeta::ExtComment(ExtMediaComment::RemoteMedia(..))
+        )
+      })
+    {
+      *existing = url;
+    } else {
+      self
+        .meta
+        .push(MediaMeta::ExtComment(ExtMediaComment::RemoteMedia(url)));
+    }
+  }
+
+  #[must_use]
+  pub fn remote_resource_id(&self) -> Option<ResourceId> {
+    self.meta.iter().find_map(|item| match item {
+      MediaMeta::ExtComment(ExtMediaComment::RemoteMedia(url)) => Some(ResourceId::from(url)),
+      _ => None,
+    })
   }
 }
 
