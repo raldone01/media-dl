@@ -1,97 +1,27 @@
-//! Media Downloader focusing on Yt Music
+//! MediaDl media downloading CLI focusing on youtube music.
+mod logging;
+mod lyrics;
+mod media_dl;
+mod media_library;
+mod utils;
+mod yt;
 
-use crate::embedded_lyrics::LyricsPresence;
-use crate::has_tools::{has_ffmpeg, has_ffprobe};
-use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
-use crate::media_library::MediaLibrary;
-use crate::{has_tools::has_ytdlp, logging::setup_logging};
 use anyhow::Error;
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use clap::ArgAction::SetFalse;
 use clap::builder::PossibleValuesParser;
 use clap::{Arg, command, value_parser};
-use std::{
-  collections::BTreeSet,
-  path::PathBuf,
-  process::exit,
-  str::FromStr as _,
-  sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-  },
-};
-use tracing::{Level, error, info, trace};
+use std::{path::PathBuf, process::exit, str::FromStr as _, sync::Arc};
+use tracing::{Level, error};
 use url::Url;
 
-mod absolute_file_path;
-mod download_playlist_info;
-mod download_song;
-mod embedded_lyrics;
-mod embedded_yt_id;
-mod fs_utils;
-mod has_tools;
-mod lofty_utils;
-mod logging;
-mod lrclib_net;
-mod m3u8;
-mod media_library;
-mod resource_id;
-mod yt_id;
-mod yt_playlist_id;
+use crate::logging::setup_logging;
+use crate::media_dl::MediaDl;
+use crate::utils::has_ffmpeg;
+use crate::utils::has_ffprobe;
+use crate::utils::has_ytdlp;
 
-const AUDIO_FILE_EXTENSIONS: &[&str] = &["mp3", "m4a", "flac", "opus", "ogg", "vorbis"];
-const FILE_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus"];
-
-const NAME: &str = env!("CARGO_PKG_NAME");
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-
-#[derive(Debug)]
-struct Cancelled;
-
-struct ExistingSongFile {
-  file_path: PathBuf,
-  yt_id: String, // TODO: optional
-  lyrics_presence: LyricsPresence,
-}
-
-struct ProcessState {
-  output_folder: PathBuf,
-  urls: BTreeSet<Url>,
-  cookies: PathBuf,
-  download_format: String,
-  no_network: bool,
-  should_exit: AtomicBool,
-}
-
-impl ProcessState {
-  #[must_use]
-  fn new(
-    output_folder: PathBuf,
-    urls: BTreeSet<Url>,
-    cookies: PathBuf,
-    download_format: String,
-    no_network: bool,
-  ) -> Self {
-    Self {
-      output_folder,
-      urls,
-      cookies,
-      download_format,
-      no_network,
-      should_exit: AtomicBool::new(false),
-    }
-  }
-
-  fn download_urls(&self) -> anyhow::Result<()> {
-    let lrclib = Lrclib::new(USER_AGENT).context("Failed to initialize LRCLIB client")?;
-    let mut media_library = MediaLibrary::new(self.output_folder.clone(), &self.should_exit)?;
-    media_library.add_urls(self.urls.iter(), &self.download_format)?;
-    media_library.download(&self.download_format, &lrclib)?;
-    media_library.write()?;
-    Ok(())
-  }
-}
+const DOWNLOAD_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus"];
 
 fn https_url(value: &str) -> Result<Url, Error> {
   let url = Url::parse(value)?;
@@ -136,7 +66,7 @@ fn new_argparser() -> clap::Command {
         .long("format")
         .help("Format")
         .value_name("format")
-        .value_parser(PossibleValuesParser::new(FILE_FORMATS))
+        .value_parser(PossibleValuesParser::new(DOWNLOAD_FORMATS))
         .default_value("opus"),
     )
     .arg(
@@ -207,7 +137,7 @@ fn main() -> anyhow::Result<()> {
     error!("ffprobe was not found. Make sure it is installed and in your PATH.")
   }
 
-  let process_state = Arc::new(ProcessState::new(
+  let media_dl = Arc::new(MediaDl::new(
     output_folder,
     urls,
     cookies_txt_file,
@@ -215,16 +145,14 @@ fn main() -> anyhow::Result<()> {
     no_network,
   ));
 
-  let ctrlc_process_state = process_state.clone();
+  let ctrlc_process_state = media_dl.clone();
   ctrlc::set_handler(move || {
     println!("\nReceived Ctrl+C! Exiting...");
-    ctrlc_process_state
-      .should_exit
-      .store(true, Ordering::Relaxed);
+    ctrlc_process_state.set_abort_token();
   })
   .expect("Error setting Ctrl+C handler");
 
-  process_state.download_urls()?;
+  media_dl.main_loop()?;
 
   Ok(())
 }

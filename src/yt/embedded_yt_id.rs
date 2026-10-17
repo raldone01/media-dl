@@ -37,12 +37,16 @@ use std::borrow::Cow;
 use thiserror::Error;
 use url::Url;
 
+use crate::yt::YtMediaId;
+
 /// The custom-field key used for the YouTube video ID in every supported format.
-pub const YTID_KEY: &str = "YTID";
+const YTID_KEY: &str = "YTID";
+/// Custom atom used in MP4
 const YTID_KEY_MP4_ATOM: AtomIdent<'_> = AtomIdent::Freeform {
   mean: Cow::Borrowed("com.apple.iTunes"),
   name: Cow::Borrowed(YTID_KEY),
 };
+/// The description (key) used in id3 for the extended url frame.
 const YTID_KEY_EXTENDED_URL_FRAME_DESCRIPTION: &str = "YouTube Music";
 
 mod embed {
@@ -102,7 +106,6 @@ mod embed {
 
 mod parse {
   use super::*;
-  use crate::yt_id::YtMediaId;
 
   /// Vendored from lofty
   fn filter_comment_frame_by_description<'a>(
@@ -143,8 +146,8 @@ mod parse {
 
   /// Try to read the YouTube video ID back from `Tag`.
   ///
-  /// Returns `None` when the format is unsupported or the field is simply
-  /// not present.
+  /// Returns `None` when the format is unsupported or
+  /// the field is simply not present.
   pub fn yt_id_from_tag(tag: &Tag) -> Option<YtMediaId> {
     let tag = tag.clone();
 

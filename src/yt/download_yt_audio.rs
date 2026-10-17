@@ -8,9 +8,10 @@ use std::{
 use tempfile::TempDir;
 use url::Url;
 
-use crate::{embedded_yt_id::embed_yt_id_tag, lofty_utils::TaggedFileWithPath};
+use crate::{utils::TaggedFileWithPath, yt::embed_yt_id_tag};
 
-pub fn download_song(output_dir: &Path, url: &Url, format: &str) -> Result<PathBuf> {
+/// TODO: take a mediaid and return a SongFile
+pub fn download_yt_audio(output_dir: &Path, yt_url: &Url, format: &str) -> Result<PathBuf> {
   let temp_dir = TempDir::new_in(output_dir).context("failed to create temp dir")?;
   let output_template = temp_dir
     .path()
@@ -45,7 +46,7 @@ pub fn download_song(output_dir: &Path, url: &Url, format: &str) -> Result<PathB
       "--quiet",
       "--no-warnings",
     ])
-    .arg(url.as_str())
+    .arg(yt_url.as_str())
     .arg("-o")
     .arg(&output_template)
     .output()

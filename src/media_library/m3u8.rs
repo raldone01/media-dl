@@ -25,8 +25,6 @@
 //! #EXTMEDIA_LOCAL_ADDITION UNCONFIRMED
 //! song4.opus
 //! ```
-//!
-//! TODO: make sure repeated files are handled properly
 
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
@@ -37,8 +35,8 @@ use anyhow::bail;
 use thiserror::Error;
 use url::{ParseError, Url};
 
-use crate::absolute_file_path::AbsoluteFilePath;
-use crate::resource_id::ResourceId;
+use crate::media_library::resource_id::ResourceId;
+use crate::utils::AbsoluteFilePath;
 
 pub enum MediaSource {
   Url(Url),

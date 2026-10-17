@@ -1,5 +1,6 @@
-use crate::{absolute_file_path::AbsoluteFilePath, yt_id::YtMediaId, yt_playlist_id::YtPlaylistId};
 use url::Url;
+
+use crate::{utils::AbsoluteFilePath, yt::YtMediaId, yt::YtPlaylistId};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ResourceId {
@@ -10,22 +11,6 @@ pub enum ResourceId {
 }
 
 impl ResourceId {
-  #[must_use]
-  pub fn yt_media_id(&self) -> Option<&YtMediaId> {
-    match self {
-      ResourceId::YtMediaId(inner) => Some(inner),
-      _ => None,
-    }
-  }
-
-  #[must_use]
-  pub fn yt_playlist_id(&self) -> Option<&YtPlaylistId> {
-    match self {
-      ResourceId::YtPlaylistId(inner) => Some(inner),
-      _ => None,
-    }
-  }
-
   pub fn to_url(&self) -> Url {
     match self {
       ResourceId::YtMediaId(yt_media_id) => yt_media_id.to_url(),

@@ -2,7 +2,6 @@
 
 use core::fmt;
 use std::io::BufReader;
-use std::path::absolute;
 use std::time::Duration;
 use std::{
   borrow::Cow,
@@ -21,22 +20,17 @@ use thiserror::Error;
 use tracing::{error, info, trace};
 use url::Url;
 
-use crate::absolute_file_path::AbsoluteFilePath;
-use crate::download_song::download_song;
-use crate::embedded_lyrics::embed_lyrics_tag;
-use crate::fs_utils::write_or_rename;
-use crate::lrclib_net::{LrcLibError, Lrclib, Lyrics, TrackQuery};
-use crate::m3u8::MediaSource;
-use crate::{
-  AUDIO_FILE_EXTENSIONS,
-  download_playlist_info::YtPlaylistInfo,
-  embedded_lyrics::LyricsPresence,
-  embedded_yt_id::yt_id_from_tag,
-  fs_utils::{file_ext, file_name_as_str, filesystem_safe_file_name},
-  lofty_utils::TaggedFileWithPath,
-  m3u8::M3U8Playlist,
-  resource_id::ResourceId,
+use crate::lyrics::{LrcLibError, LrclibClient, Lyrics, TrackQuery};
+use crate::lyrics::{LyricsPresence, embed_lyrics_tag};
+use crate::media_library::m3u8::{M3U8Playlist, MediaSource};
+use crate::media_library::resource_id::ResourceId;
+use crate::utils::{
+  AbsoluteFilePath, TaggedFileWithPath, file_ext, file_name_as_str, filesystem_safe_file_name,
+  write_or_rename,
 };
+use crate::yt::{YtPlaylistMeta, download_yt_audio, yt_id_from_tag};
+
+const AUDIO_FILE_EXTENSIONS: &[&str] = &["mp3", "m4a", "flac", "opus", "ogg", "vorbis"];
 
 #[derive(Debug)]
 struct Cancelled;
@@ -74,7 +68,7 @@ impl SongFile {
     let album = tag.album().map(Cow::into_owned);
     let duration = tagged_file.duration();
 
-    let absolute_path = AbsoluteFilePath::new(absolute(file_path)?).expect("We called absolute");
+    let absolute_path = AbsoluteFilePath::new_with_cwd(file_path)?;
 
     Ok(Self {
       original_file_path: absolute_path,
@@ -128,7 +122,7 @@ impl SongFile {
     Ok(())
   }
 
-  fn fetch_lyrics(&self, lrclib: &Lrclib) -> Result<Option<Lyrics>, LrcLibError> {
+  fn fetch_lyrics(&self, lrclib: &LrclibClient) -> Result<Option<Lyrics>, LrcLibError> {
     // get lyrics from lrclib
     let Some(title) = &self.title else {
       return Ok(None);
@@ -159,7 +153,10 @@ impl SongFile {
     Ok(Some(lyrics))
   }
 
-  pub fn download_and_embed_lyrics_if_needed(&mut self, lrclib: &Lrclib) -> anyhow::Result<()> {
+  pub fn download_and_embed_lyrics_if_needed(
+    &mut self,
+    lrclib: &LrclibClient,
+  ) -> anyhow::Result<()> {
     // check if we need the lyrics
     if self.lyrics_presence.has_synced_lyrics {
       return Ok(());
@@ -184,7 +181,7 @@ impl SongFile {
     Ok(())
   }
 
-  pub fn check_media_meta(&mut self, lrclib: &Lrclib) -> anyhow::Result<()> {
+  pub fn check_media_meta(&mut self, lrclib: &LrclibClient) -> anyhow::Result<()> {
     self.rename_if_needed()?;
     self.download_and_embed_lyrics_if_needed(lrclib)?;
     // TODO: hit the apis to get updated meta data
@@ -316,7 +313,7 @@ enum ExistingFileEntry {
   Song(SongFile),
 }
 
-pub struct MediaLibrary {
+pub struct MediaLibrary<'a> {
   library_path: PathBuf,
   /// collects existing music files
   songs: Vec<SongFile>,
@@ -324,9 +321,11 @@ pub struct MediaLibrary {
   playlists: Vec<PlaylistFile>,
   /// collects existing m3u8 playlists for marking untracked media files
   untracked_playlists: Vec<PlaylistFile>,
+  lrclib: &'a LrclibClient,
+  abort_token: &'a AtomicBool,
 }
 
-impl MediaLibrary {
+impl<'a> MediaLibrary<'a> {
   fn ingest_existing_file(
     entry_result: Result<jwalk::DirEntry<((), ())>, jwalk::Error>,
   ) -> anyhow::Result<Option<ExistingFileEntry>> {
@@ -383,7 +382,11 @@ impl MediaLibrary {
   }
 
   #[must_use]
-  pub fn new(library_path: PathBuf, abort_token: &AtomicBool) -> anyhow::Result<Self> {
+  pub fn new(
+    library_path: PathBuf,
+    lrclib: &'a LrclibClient,
+    abort_token: &'a AtomicBool,
+  ) -> anyhow::Result<Self> {
     fs::create_dir_all(&library_path).context("Failed to create output folder")?;
 
     let file_entries = WalkDir::new(&library_path).max_depth(1).into_iter();
@@ -436,6 +439,8 @@ impl MediaLibrary {
       playlists,
       songs,
       untracked_playlists,
+      lrclib,
+      abort_token,
     };
 
     selv.startup_playlist_consistency()?;
@@ -559,9 +564,9 @@ impl MediaLibrary {
     Ok(())
   }
 
-  pub fn add_urls<'a>(
+  pub fn add_urls<'b>(
     &mut self,
-    urls: impl IntoIterator<Item = &'a Url>,
+    urls: impl IntoIterator<Item = &'b Url>,
     format: &str,
   ) -> Result<(), AddUrlsError> {
     let mut url_errors = HashMap::new();
@@ -581,7 +586,7 @@ impl MediaLibrary {
     match resource_id {
       Some(ResourceId::YtPlaylistId(ref yt_playlist_id)) => {
         // query playlist information from yt
-        let yt_playlist_info = YtPlaylistInfo::download_from_yt(yt_playlist_id)?;
+        let yt_playlist_info = YtPlaylistMeta::download_playlist_meta(yt_playlist_id)?;
         playlist.queue_rename(&yt_playlist_info.title)?;
         playlist.m3u8_playlist.update_playlist_from_remote(
           yt_playlist_info
@@ -620,9 +625,12 @@ impl MediaLibrary {
     match resource_id {
       ResourceId::YtMediaId(yt_media_id) => {
         info!("Downloading {}", resource_id.to_url().to_string());
-        let yt_song_path = download_song(&self.library_path, &yt_media_id.to_url(), &format)?;
+        let yt_song_path = download_yt_audio(&self.library_path, &yt_media_id.to_url(), &format)?;
         let mut song_file = SongFile::new_from_disk(yt_song_path)?;
         song_file.rename_if_needed()?;
+        if let Err(error) = song_file.download_and_embed_lyrics_if_needed(&self.lrclib) {
+          error!("Failed to fetch lyrics for {song_file}: {error}");
+        }
         self.songs.push(song_file);
       },
       ResourceId::LocalFile(..) => {
@@ -644,7 +652,7 @@ impl MediaLibrary {
     Ok(())
   }
 
-  pub fn download(&mut self, format: &str, lrclib: &Lrclib) -> anyhow::Result<()> {
+  pub fn download(&mut self, format: &str) -> anyhow::Result<()> {
     // update the playlists from the remote
     for playlist in &mut self.playlists {
       if let Err(error) = Self::update_playlist_from_remote(playlist, format) {
@@ -690,7 +698,7 @@ impl MediaLibrary {
         .iter_mut()
         .find(|song| song.resource_id == resource_id)
         .expect("media to check must exist on disk");
-      if let Err(error) = song_file.check_media_meta(lrclib) {
+      if let Err(error) = song_file.check_media_meta(self.lrclib) {
         error!("Failed to update the metadata of {song_file}: {error}")
       }
     }

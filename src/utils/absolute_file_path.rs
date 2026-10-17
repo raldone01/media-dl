@@ -1,6 +1,7 @@
 use std::{
+  io,
   ops::Deref,
-  path::{Path, PathBuf},
+  path::{Path, PathBuf, absolute},
 };
 
 use url::Url;
@@ -18,6 +19,16 @@ impl AbsoluteFilePath {
     }
 
     Some(Self(path.to_path_buf()))
+  }
+
+  pub fn new_with_cwd(path: impl AsRef<Path>) -> io::Result<Self> {
+    let path = path.as_ref();
+
+    if !path.is_absolute() {
+      return Ok(Self(absolute(path)?));
+    }
+
+    Ok(Self(path.to_path_buf()))
   }
 
   #[must_use]

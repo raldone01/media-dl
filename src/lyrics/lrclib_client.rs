@@ -1,4 +1,4 @@
-//! Minimal LRCLIB API client.
+//! Minimal LRCLIB API client (https://lrclib.net/docs).
 
 use std::{
   sync::{Arc, Mutex},
@@ -13,10 +13,10 @@ use thiserror::Error;
 
 const DEFAULT_BASE_URL: &str = "https://lrclib.net";
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
-const DEFAULT_MAX_RETRIES: usize = 3;
+const DEFAULT_MAX_RETRIES: usize = 6;
 
 #[derive(Clone)]
-pub struct Lrclib {
+pub struct LrclibClient {
   client: Client,
   base_url: String,
   user_agent: String,
@@ -95,7 +95,7 @@ impl<'a> TrackQuery<'a> {
   }
 }
 
-impl Lrclib {
+impl LrclibClient {
   /// Create a client using LRCLIB's public API.
   ///
   /// `application` should identify the application and ideally include a

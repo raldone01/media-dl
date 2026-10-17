@@ -12,10 +12,6 @@ Implement cooldowns and retries (exponential bounded backoff).
 Implement watching a cookies.txt until it is replaced with new ones.
 Ask the user to change them when it fails.
 
-TODO: reconcile functionality to fix m3u8 files based on resource_id when the user renames media files.
-It should also copy back resource_ids from the files into the m3u8 playlists
-TODO: might want to introduce YtIdMedia and YtIdPlaylist as we can tell them apart. we can avoid the yt queries upon adding playlists or media if we implement this.
-
 Wanted log output:
 ```
 SECTION_START: Reading existing files and running playlist reconcile.
