@@ -1,4 +1,4 @@
-//! MediaDl media downloading CLI focusing on youtube music.
+//! `media-dl` - a media downloading CLI focusing on youtube music.
 mod logging;
 mod lyrics;
 mod media_dl;
@@ -22,7 +22,10 @@ use crate::utils::has_ffmpeg;
 use crate::utils::has_ffprobe;
 use crate::utils::has_ytdlp;
 
-const DOWNLOAD_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus"];
+pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
+
+const AUDIO_DOWNLOAD_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus", "wav"];
+const VIDEO_DOWNLOAD_FORMATS: &[&str] = &["mkv"];
 
 fn https_url(value: &str) -> Result<Url, Error> {
   let url = Url::parse(value)?;
@@ -37,38 +40,56 @@ fn https_url(value: &str) -> Result<Url, Error> {
 #[must_use]
 fn new_argparser() -> clap::Command {
   command!()
-    .about("Downloads songs from youtube music.")
+    .about(format!(
+      "`{CRATE_NAME}` - a media downloading CLI focusing on youtube music."
+    ))
     .arg(
-      Arg::new("flagged_urls")
-        .long("urls")
-        .help("Urls to download")
+      Arg::new("flagged_audio_urls")
+        .long("audio-urls")
+        .help("Audio urls to download")
         .num_args(1..)
-        .value_name("urls")
+        .value_name("audio urls")
         .value_parser(https_url),
     )
     .arg(
-      Arg::new("positional_urls")
-        .help("Urls to download")
+      Arg::new("positional_audio_urls")
+        .help("Audio urls to download")
         .num_args(1..)
-        .value_name("urls")
+        .value_name("audio urls")
         .value_parser(https_url),
     )
     .arg(
-      Arg::new("output_folder")
-        .long("output-folder")
-        .help("Output folder")
+      Arg::new("audio_format")
+        .long("audio-format")
+        .help("Audio format")
+        .value_name("audio-format")
+        .value_parser(PossibleValuesParser::new(AUDIO_DOWNLOAD_FORMATS))
+        .default_value("opus"),
+    )
+    .arg(
+      Arg::new("video_urls")
+        .long("video-urls")
+        .help("Video urls to download")
         .num_args(1..)
-        .value_name("output folder")
+        .value_name("video urls")
+        .value_parser(https_url),
+    )
+    .arg(
+      Arg::new("video_format")
+        .long("video-format")
+        .help("Video format")
+        .value_name("video-format")
+        .value_parser(PossibleValuesParser::new(VIDEO_DOWNLOAD_FORMATS))
+        .default_value("mkv"),
+    )
+    .arg(
+      Arg::new("media_library_dir")
+        .long("media-library")
+        .help("Media library directory used to store output files.")
+        .num_args(1..)
+        .value_name("media library directory")
         .value_parser(value_parser!(PathBuf))
         .required(true),
-    )
-    .arg(
-      Arg::new("format")
-        .long("format")
-        .help("Format")
-        .value_name("format")
-        .value_parser(PossibleValuesParser::new(DOWNLOAD_FORMATS))
-        .default_value("opus"),
     )
     .arg(
       Arg::new("log_level")
@@ -109,20 +130,34 @@ fn run() -> anyhow::Result<()> {
     .and_then(|level| Level::from_str(level).ok());
   setup_logging(log_level);
 
-  let flagged_urls = matches.get_many::<Url>("flagged_urls").unwrap_or_default();
-  let positional_urls = matches
-    .get_many::<Url>("positional_urls")
+  let flagged_audio_urls = matches
+    .get_many::<Url>("flagged_audio_urls")
     .unwrap_or_default();
-  let urls = flagged_urls.chain(positional_urls).cloned().collect();
-
-  let output_folder = matches
-    .get_one::<PathBuf>("output_folder")
-    .expect("Required argument")
+  let positional_audio_urls = matches
+    .get_many::<Url>("positional_audio_urls")
+    .unwrap_or_default();
+  let audio_urls = flagged_audio_urls
+    .chain(positional_audio_urls)
+    .cloned()
+    .collect();
+  let audio_download_format = matches
+    .get_one::<String>("audio_format")
+    .expect("Has a default value")
     .clone();
 
-  let download_format = matches
-    .get_one::<String>("format")
+  let video_urls = matches
+    .get_many::<Url>("video_urls")
+    .unwrap_or_default()
+    .cloned()
+    .collect();
+  let video_download_format = matches
+    .get_one::<String>("video_format")
     .expect("Has a default value")
+    .clone();
+
+  let media_library_dir = matches
+    .get_one::<PathBuf>("media_library_dir")
+    .expect("Required argument")
     .clone();
 
   let cookies_txt_file = matches
@@ -146,10 +181,12 @@ fn run() -> anyhow::Result<()> {
   }
 
   let media_dl = Arc::new(MediaDl::new(
-    output_folder,
-    urls,
+    audio_urls,
+    audio_download_format,
+    video_urls,
+    video_download_format,
+    media_library_dir,
     cookies_txt_file,
-    download_format,
     no_network,
   ));
 

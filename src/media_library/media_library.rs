@@ -19,16 +19,18 @@ use thiserror::Error;
 use tracing::{error, info, trace};
 use url::Url;
 
+use crate::CRATE_NAME;
 use crate::lyrics::LrclibClient;
 use crate::media_library::AudioFile;
 use crate::media_library::m3u8::{M3U8Playlist, MediaSource};
 use crate::media_library::resource_id::ResourceId;
 use crate::utils::{
-  file_ext, file_name_as_str, filesystem_safe_file_name, safe_overwrite, smart_rename,
+  file_ext, file_name_as_str, filesystem_safe_file_name, mark_dir_as_cache_dir, safe_overwrite,
+  smart_rename,
 };
 use crate::yt::{YtPlaylistMeta, download_yt_audio};
 
-const AUDIO_FILE_EXTENSIONS: &[&str] = &["mp3", "m4a", "flac", "opus", "ogg", "vorbis"];
+const AUDIO_FILE_EXTENSIONS: &[&str] = &["mp3", "m4a", "flac", "opus", "ogg", "vorbis", "wav"];
 
 #[derive(Debug)]
 struct Cancelled;
@@ -273,6 +275,7 @@ impl<'a> MediaLibrary<'a> {
     }
 
     let temp_dir = TempDir::new_in(&library_path)?;
+    mark_dir_as_cache_dir(temp_dir.path(), Some(CRATE_NAME))?;
 
     let mut selv = Self {
       library_path,

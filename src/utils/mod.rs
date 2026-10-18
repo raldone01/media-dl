@@ -1,6 +1,9 @@
 mod absolute_file_path;
 pub use absolute_file_path::*;
 
+mod cachedir_tag;
+pub use cachedir_tag::*;
+
 mod fs_utils;
 pub use fs_utils::*;
 

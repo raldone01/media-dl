@@ -16,13 +16,13 @@
         }
       },
       "args": [
-        "--output-folder",
-        "./tmp/out",
+        "--media-library",
+        "./tmp/media_library",
         "--cookies",
         "${env:HOME}/Downloads/cookies.txt",
         "https://music.youtube.com/watch?v=XqoanTj5pNY",
         "https://music.youtube.com/playlist?list=PLVbh6SVim2R0",
-        "--format",
+        "--audio-format",
         "mp3"
       ],
       "cwd": "${workspaceFolder}"
