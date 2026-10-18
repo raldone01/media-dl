@@ -45,8 +45,6 @@ pub enum YtDlpError {
     message: String,
     stderr: String,
   },
-  #[error("unexpected yt-dlp output: {0}")]
-  BadOutput(String),
   #[error("failed to parse yt-dlp JSON: {0}")]
   Json(#[from] serde_json::Error),
 }
@@ -193,6 +191,7 @@ impl<'a> YtDlp<'a> {
     loop {
       if aborted() {
         let _ = child.kill();
+        let _ = child.wait();
         // Don't join the readers. They exit on their own once the pipes
         // close, and we don't want an abort to ever block.
         drop(readers);
