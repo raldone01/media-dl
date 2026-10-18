@@ -2,11 +2,10 @@
 
 use core::fmt;
 use std::io::BufReader;
-use std::time::Duration;
+use std::path::Path;
 use std::{
   borrow::Cow,
   collections::{BTreeSet, HashMap},
-  ffi::OsStr,
   fs,
   path::PathBuf,
   sync::atomic::{AtomicBool, Ordering},
@@ -14,202 +13,25 @@ use std::{
 
 use anyhow::{Context as _, anyhow, bail};
 use jwalk::WalkDir;
-use lofty::tag::Accessor;
 use rayon::iter::{ParallelBridge as _, ParallelIterator as _};
+use tempfile::TempDir;
 use thiserror::Error;
 use tracing::{error, info, trace};
 use url::Url;
 
-use crate::lyrics::{LrcLibError, LrclibClient, Lyrics, TrackQuery};
-use crate::lyrics::{LyricsPresence, embed_lyrics_tag};
+use crate::lyrics::LrclibClient;
+use crate::media_library::AudioFile;
 use crate::media_library::m3u8::{M3U8Playlist, MediaSource};
 use crate::media_library::resource_id::ResourceId;
 use crate::utils::{
-  AbsoluteFilePath, TaggedFileWithPath, file_ext, file_name_as_str, filesystem_safe_file_name,
-  write_or_rename,
+  file_ext, file_name_as_str, filesystem_safe_file_name, safe_overwrite, smart_rename,
 };
-use crate::yt::{YtPlaylistMeta, download_yt_audio, yt_id_from_tag};
+use crate::yt::{YtPlaylistMeta, download_yt_audio};
 
 const AUDIO_FILE_EXTENSIONS: &[&str] = &["mp3", "m4a", "flac", "opus", "ogg", "vorbis"];
 
 #[derive(Debug)]
 struct Cancelled;
-
-struct SongFile {
-  original_file_path: AbsoluteFilePath,
-  renamed_file_path: Option<AbsoluteFilePath>,
-  resource_id: ResourceId,
-  lyrics_presence: LyricsPresence,
-  title: Option<String>,
-  artist: Option<String>,
-  album: Option<String>,
-  duration: Duration,
-}
-
-impl SongFile {
-  pub fn new_from_disk(file_path: PathBuf) -> anyhow::Result<Self> {
-    let tagged_file = TaggedFileWithPath::open(&file_path)?;
-    let Some(tag) = tagged_file.tag() else {
-      bail!("No tag found in the file")
-    };
-    let resource_id = yt_id_from_tag(tag).map(|yt_id| ResourceId::YtMediaId(yt_id));
-    let resource_id = match resource_id {
-      Some(resource_id) => resource_id,
-      None => {
-        let Some(absolute_file_path) = AbsoluteFilePath::new(&file_path) else {
-          bail!("{} is not a absolute path", file_path.display());
-        };
-        ResourceId::LocalFile(absolute_file_path)
-      },
-    };
-    let lyrics_presence = LyricsPresence::from_tag(tag);
-    let title = tag.title().map(Cow::into_owned);
-    let artist = tag.artist().map(Cow::into_owned);
-    let album = tag.album().map(Cow::into_owned);
-    let duration = tagged_file.duration();
-
-    let absolute_path = AbsoluteFilePath::new_with_cwd(file_path)?;
-
-    Ok(Self {
-      original_file_path: absolute_path,
-      renamed_file_path: None,
-      resource_id,
-      lyrics_presence,
-      title,
-      artist,
-      album,
-      duration,
-    })
-  }
-
-  fn pretty_name(&self) -> String {
-    let title = self
-      .title
-      .as_ref()
-      .map(|title| Cow::Borrowed(title.as_str()))
-      .or_else(|| {
-        self
-          .original_file_path
-          .file_name()
-          .map(OsStr::to_string_lossy)
-      })
-      .unwrap_or_else(|| self.original_file_path.to_string_lossy());
-    let artist = self
-      .artist
-      .as_deref()
-      .map(|artist| format!(" - {artist}"))
-      .unwrap_or_default();
-
-    format!("{title}{artist}")
-  }
-
-  pub fn rename_if_needed(&mut self) -> anyhow::Result<()> {
-    let file_ext = file_ext(&self.original_file_path)?;
-    let pretty_name = self.pretty_name();
-    let file_name = filesystem_safe_file_name(&format!("{pretty_name}.{file_ext}"));
-    if file_name.is_empty() {
-      return Ok(());
-    }
-    let new_file_path = self
-      .original_file_path
-      .parent()
-      .expect("File must have a parent")
-      .join(PathBuf::from(file_name));
-    if new_file_path != *self.original_file_path {
-      self.renamed_file_path =
-        Some(AbsoluteFilePath::new(new_file_path).expect("We came from an absolute path"));
-    }
-    Ok(())
-  }
-
-  fn fetch_lyrics(&self, lrclib: &LrclibClient) -> Result<Option<Lyrics>, LrcLibError> {
-    // get lyrics from lrclib
-    let Some(title) = &self.title else {
-      return Ok(None);
-    };
-    let mut query = TrackQuery::new(title);
-    if let Some(artist) = &self.artist {
-      query = query.artist(artist);
-    }
-    if let Some(album) = &self.album {
-      query = query.album(album);
-    }
-    query = query.duration(self.duration.as_secs_f64());
-
-    let lyrics = match lrclib.get(&query) {
-      Ok(lyrics) => lyrics,
-      Err(LrcLibError::NotFound) => {
-        let results = lrclib.search(&query)?;
-
-        let Some(lyrics) = results.into_iter().next() else {
-          return Ok(None);
-        };
-
-        lyrics
-      },
-      Err(error) => return Err(error),
-    };
-
-    Ok(Some(lyrics))
-  }
-
-  pub fn download_and_embed_lyrics_if_needed(
-    &mut self,
-    lrclib: &LrclibClient,
-  ) -> anyhow::Result<()> {
-    // check if we need the lyrics
-    if self.lyrics_presence.has_synced_lyrics {
-      return Ok(());
-    }
-
-    // fetch new lyrics
-    let Some(new_lyrics) = self
-      .fetch_lyrics(lrclib)
-      .context(format!("Failed to get lyrics for {self}"))?
-    else {
-      return Ok(());
-    };
-
-    // embed the lyrics into the file
-    let mut tagged_file = TaggedFileWithPath::open(&self.original_file_path)?;
-    tagged_file.patch_tag(embed_lyrics_tag(
-      new_lyrics.plain_lyrics.as_ref().map(String::as_str),
-      new_lyrics.synced_lyrics.as_ref().map(String::as_str),
-    ))?;
-    tagged_file.overwrite()?;
-
-    Ok(())
-  }
-
-  pub fn check_media_meta(&mut self, lrclib: &LrclibClient) -> anyhow::Result<()> {
-    self.rename_if_needed()?;
-    self.download_and_embed_lyrics_if_needed(lrclib)?;
-    // TODO: hit the apis to get updated meta data
-    Ok(())
-  }
-
-  pub fn write(&self) -> anyhow::Result<()> {
-    write_or_rename(
-      Some(self.original_file_path.as_path()),
-      self.renamed_file_path.as_ref().map(|p| p.as_path()),
-      false,
-      |_, _| panic!("Songs already exist on disk"),
-    )?;
-    Ok(())
-  }
-}
-
-impl fmt::Display for SongFile {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    let pretty_name = self.pretty_name();
-
-    write!(
-      f,
-      "Song \"{pretty_name}\" {}",
-      self.resource_id.to_url().to_string(),
-    )
-  }
-}
 
 struct PlaylistFile {
   original_file_path: Option<PathBuf>,
@@ -265,21 +87,36 @@ impl PlaylistFile {
     Ok(())
   }
 
-  pub fn write(&self) -> anyhow::Result<()> {
-    write_or_rename(
+  #[must_use]
+  pub fn final_file_path(&self) -> &Path {
+    &self
+      .renamed_file_path
+      .as_ref()
+      .or(self.original_file_path.as_ref())
+      .expect("At least renamed_file_path or original_file_path must be Some")
+  }
+
+  pub fn write(&mut self, temp_dir: &Path) -> anyhow::Result<()> {
+    self.original_file_path = Some(smart_rename(
       self.original_file_path.as_ref(),
-      self.renamed_file_path.as_ref(),
-      true,
-      |mut writer, file_path| {
+      self.renamed_file_path.as_ref().map(|p| p.as_path()),
+    )?);
+    self.renamed_file_path = None;
+
+    safe_overwrite(
+      self.final_file_path(),
+      |mut writer| {
         Ok(
           self.m3u8_playlist.serialize(
             &mut writer,
-            &file_path
+            &self
+              .final_file_path()
               .parent()
               .expect("Playlist file must have a parent"),
           )?,
         )
       },
+      temp_dir,
     )?;
     Ok(())
   }
@@ -310,19 +147,20 @@ impl fmt::Display for PlaylistFile {
 enum ExistingFileEntry {
   Playlist(PlaylistFile),
   UntrackedPlaylist(PlaylistFile),
-  Song(SongFile),
+  Song(AudioFile),
 }
 
 pub struct MediaLibrary<'a> {
   library_path: PathBuf,
   /// collects existing music files
-  songs: Vec<SongFile>,
+  songs: Vec<AudioFile>,
   /// collects existing m3u8 playlists
   playlists: Vec<PlaylistFile>,
   /// collects existing m3u8 playlists for marking untracked media files
   untracked_playlists: Vec<PlaylistFile>,
   lrclib: &'a LrclibClient,
   abort_token: &'a AtomicBool,
+  temp_dir: TempDir,
 }
 
 impl<'a> MediaLibrary<'a> {
@@ -373,7 +211,7 @@ impl<'a> MediaLibrary<'a> {
         PlaylistFile::new_from_disk(file_path)?,
       )))
     } else if AUDIO_FILE_EXTENSIONS.contains(&ext.as_str()) {
-      Ok(Some(ExistingFileEntry::Song(SongFile::new_from_disk(
+      Ok(Some(ExistingFileEntry::Song(AudioFile::new_from_disk(
         file_path,
       )?)))
     } else {
@@ -421,7 +259,7 @@ impl<'a> MediaLibrary<'a> {
     };
 
     // collects existing music files
-    let mut songs: Vec<SongFile> = Vec::new();
+    let mut songs: Vec<AudioFile> = Vec::new();
     // collects existing m3u8 playlists
     let mut playlists: Vec<PlaylistFile> = Vec::new();
     let mut untracked_playlists: Vec<PlaylistFile> = Vec::new();
@@ -434,6 +272,8 @@ impl<'a> MediaLibrary<'a> {
       }
     }
 
+    let temp_dir = TempDir::new_in(&library_path)?;
+
     let mut selv = Self {
       library_path,
       playlists,
@@ -441,6 +281,7 @@ impl<'a> MediaLibrary<'a> {
       untracked_playlists,
       lrclib,
       abort_token,
+      temp_dir,
     };
 
     selv.startup_playlist_consistency()?;
@@ -455,8 +296,8 @@ impl<'a> MediaLibrary<'a> {
           MediaSource::File(file_path) => self
             .songs
             .iter()
-            .find(|song| song.original_file_path == *file_path)
-            .map(|song| Cow::Borrowed(&song.resource_id)),
+            .find(|song| song.final_file_path() == file_path)
+            .map(|song| Cow::Borrowed(song.resource_id())),
           MediaSource::Url(remote_url) => Some(Cow::Owned(ResourceId::from(remote_url))),
         };
         let remote_resource_id = media_item.remote_resource_id();
@@ -496,11 +337,11 @@ impl<'a> MediaLibrary<'a> {
       .expect("pushed at least one item onto the vec")
   }
 
-  fn song_file_by_resource_id(&self, resource_id: &ResourceId) -> Option<&SongFile> {
+  fn song_file_by_resource_id(&self, resource_id: &ResourceId) -> Option<&AudioFile> {
     let song = self
       .songs
       .iter()
-      .find(|song| song.resource_id == *resource_id);
+      .find(|song| song.resource_id() == resource_id);
     song
   }
 
@@ -540,14 +381,15 @@ impl<'a> MediaLibrary<'a> {
           .is_some();
 
         if !playlist_is_already_part_of_playlist {
-          let mut m3u8_playlist = M3U8Playlist::default();
-          m3u8_playlist.set_playlist_resource_id(resource_id.clone())?;
-
           let mut file_path = self
             .library_path
             .join(filesystem_safe_file_name(yt_playlist_id.as_str()));
           file_path.set_extension("m3u8");
-          self.playlists.push(PlaylistFile::new(file_path));
+          let mut playlist = PlaylistFile::new(file_path);
+          playlist
+            .m3u8_playlist
+            .set_playlist_resource_id(resource_id.clone())?;
+          self.playlists.push(playlist);
         } else {
           info!(
             "Skipped adding youtube playlist {url_info_string} as it is already part of the media library!"
@@ -581,12 +423,16 @@ impl<'a> MediaLibrary<'a> {
     Ok(())
   }
 
-  fn update_playlist_from_remote(playlist: &mut PlaylistFile, format: &str) -> anyhow::Result<()> {
+  fn update_playlist_from_remote(
+    playlist: &mut PlaylistFile,
+    format: &str,
+    abort_token: &AtomicBool,
+  ) -> anyhow::Result<()> {
     let resource_id = playlist.m3u8_playlist.resource_id();
     match resource_id {
       Some(ResourceId::YtPlaylistId(ref yt_playlist_id)) => {
         // query playlist information from yt
-        let yt_playlist_info = YtPlaylistMeta::download_playlist_meta(yt_playlist_id)?;
+        let yt_playlist_info = YtPlaylistMeta::download_playlist_meta(yt_playlist_id, abort_token)?;
         playlist.queue_rename(&yt_playlist_info.title)?;
         playlist.m3u8_playlist.update_playlist_from_remote(
           yt_playlist_info
@@ -625,13 +471,20 @@ impl<'a> MediaLibrary<'a> {
     match resource_id {
       ResourceId::YtMediaId(yt_media_id) => {
         info!("Downloading {}", resource_id.to_url().to_string());
-        let yt_song_path = download_yt_audio(&self.library_path, &yt_media_id.to_url(), &format)?;
-        let mut song_file = SongFile::new_from_disk(yt_song_path)?;
-        song_file.rename_if_needed()?;
-        if let Err(error) = song_file.download_and_embed_lyrics_if_needed(&self.lrclib) {
-          error!("Failed to fetch lyrics for {song_file}: {error}");
+        let mut audio_file = download_yt_audio(
+          &self.library_path,
+          yt_media_id,
+          &format,
+          self.abort_token,
+          &self.temp_dir.path(),
+        )?;
+        audio_file.rename_if_needed()?;
+        if let Err(error) =
+          audio_file.download_and_embed_lyrics_if_needed(&self.lrclib, &self.temp_dir.path())
+        {
+          error!("Failed to fetch lyrics for {audio_file}: {error:#}");
         }
-        self.songs.push(song_file);
+        self.songs.push(audio_file);
       },
       ResourceId::LocalFile(..) => {
         // no-op
@@ -655,8 +508,8 @@ impl<'a> MediaLibrary<'a> {
   pub fn download(&mut self, format: &str) -> anyhow::Result<()> {
     // update the playlists from the remote
     for playlist in &mut self.playlists {
-      if let Err(error) = Self::update_playlist_from_remote(playlist, format) {
-        error!("Failed to download {playlist}: {error}");
+      if let Err(error) = Self::update_playlist_from_remote(playlist, format, self.abort_token) {
+        error!("Failed to download {playlist}: {error:#}");
       }
     }
 
@@ -675,10 +528,10 @@ impl<'a> MediaLibrary<'a> {
     // subtract the existing files from media_to_download and add them to media_to_check
     let mut media_to_check = BTreeSet::<ResourceId>::new();
     for existing_media in &self.songs {
-      let removed = media_to_download.remove(&existing_media.resource_id);
+      let removed = media_to_download.remove(existing_media.resource_id());
       if removed {
-        info!("Skipping {}", existing_media.resource_id.to_url());
-        media_to_check.insert(existing_media.resource_id.clone());
+        info!("Skipping {}", existing_media.resource_id().to_url());
+        media_to_check.insert(existing_media.resource_id().clone());
       }
     }
 
@@ -686,7 +539,7 @@ impl<'a> MediaLibrary<'a> {
     for resource_id in media_to_download {
       if let Err(error) = self.download_media_into_library(&resource_id, &format) {
         error!(
-          "Failed to download {}: {error}",
+          "Failed to download {}: {error:#}",
           resource_id.to_url().to_string()
         );
       }
@@ -696,10 +549,10 @@ impl<'a> MediaLibrary<'a> {
       let song_file = self
         .songs
         .iter_mut()
-        .find(|song| song.resource_id == resource_id)
+        .find(|song| *song.resource_id() == resource_id)
         .expect("media to check must exist on disk");
-      if let Err(error) = song_file.check_media_meta(self.lrclib) {
-        error!("Failed to update the metadata of {song_file}: {error}")
+      if let Err(error) = song_file.check_media_meta(self.lrclib, &self.temp_dir.path()) {
+        error!("Failed to update the metadata of {song_file}: {error:#}")
       }
     }
 
@@ -716,14 +569,11 @@ impl<'a> MediaLibrary<'a> {
         let Some(song_file) = self
           .songs
           .iter_mut()
-          .find(|song| song.resource_id == media_entry.resource_id())
+          .find(|song| *song.resource_id() == media_entry.resource_id())
         else {
           continue;
         };
-        let file_path = song_file
-          .renamed_file_path
-          .as_ref()
-          .unwrap_or(&song_file.original_file_path);
+        let file_path = song_file.final_file_path();
         media_entry.media_source = MediaSource::File(file_path.clone());
       }
     }
@@ -732,10 +582,14 @@ impl<'a> MediaLibrary<'a> {
   pub fn write(&mut self) -> anyhow::Result<()> {
     self.fix_playlist_media_entry_paths();
 
-    for playlist in self.playlists.iter().chain(self.untracked_playlists.iter()) {
-      playlist.write()?;
+    for playlist in self
+      .playlists
+      .iter_mut()
+      .chain(self.untracked_playlists.iter_mut())
+    {
+      playlist.write(self.temp_dir.path())?;
     }
-    for song in &self.songs {
+    for song in &mut self.songs {
       song.write()?;
     }
     Ok(())

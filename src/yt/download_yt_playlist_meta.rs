@@ -1,8 +1,11 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use serde::Deserialize;
-use std::process::Command;
+use std::sync::atomic::AtomicBool;
 
-use crate::{yt::YtMediaId, yt::YtPlaylistId};
+use crate::{
+  yt::{YtMediaId, YtPlaylistId},
+  yt_dlp::YtDlp,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct YtPlaylistMeta {
@@ -18,27 +21,15 @@ pub struct YtPlaylistEntry {
 
 impl YtPlaylistMeta {
   #[must_use]
-  pub fn download_playlist_meta(yt_playlist_id: &YtPlaylistId) -> Result<Self> {
-    let output = Command::new("yt-dlp")
-      .args([
-        "--flat-playlist",
-        // Prefer the playlist if the url is for a video in a playlist.
-        "--yes-playlist",
-        "-J",
-        yt_playlist_id.to_url().as_str(),
-      ])
-      .output()?;
-
-    if !output.status.success() {
-      return Err(anyhow!(
-        "yt-dlp failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-      ));
-    }
-
-    //let value_debug_str = String::from_utf8(output.stdout.clone()).unwrap();
-
-    let playlist_info = serde_json::from_slice::<Self>(&output.stdout)?;
-    Ok(playlist_info)
+  pub fn download_playlist_meta(
+    yt_playlist_id: &YtPlaylistId,
+    abort_token: &AtomicBool,
+  ) -> Result<Self> {
+    let playlist_meta = YtDlp::new()
+      .abort_token(abort_token)
+      .args(["--flat-playlist", "--yes-playlist", "-J"])
+      .arg(yt_playlist_id.to_url().as_str())
+      .run_json()?;
+    Ok(playlist_meta)
   }
 }

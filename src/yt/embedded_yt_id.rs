@@ -58,7 +58,7 @@ mod embed {
     UnsupportedTag { tag_type: TagType },
   }
 
-  pub fn embed_yt_id_tag(yt_id: &str) -> impl Fn(Tag) -> Result<Tag, EmbedError> {
+  pub fn embed_yt_id_tag(yt_id: &YtMediaId) -> impl Fn(Tag) -> Result<Tag, EmbedError> {
     |tag| {
       match tag.tag_type() {
         TagType::Id3v2 => {
@@ -68,7 +68,9 @@ mod embed {
 
           let mut youtube_music_url =
             Url::parse("https://music.youtube.com/watch").expect("valid constant url");
-          youtube_music_url.query_pairs_mut().append_pair("v", yt_id);
+          youtube_music_url
+            .query_pairs_mut()
+            .append_pair("v", yt_id.as_str());
 
           id3v2.insert(
             ExtendedUrlFrame::new(

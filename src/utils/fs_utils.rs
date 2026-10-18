@@ -1,10 +1,12 @@
 use std::{
-  fs::{self, File},
-  io::{BufWriter, Write},
+  ffi::OsStr,
+  fs::{self, File, OpenOptions},
+  io::{self, Write},
   path::{Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow};
+use tempfile::NamedTempFile;
 
 pub fn file_name_as_str(file: &Path) -> Result<String> {
   file
@@ -15,12 +17,12 @@ pub fn file_name_as_str(file: &Path) -> Result<String> {
 }
 
 /// Returns the file extension without the dot.
-pub fn file_ext(file: &Path) -> Result<String> {
-  file
+pub fn file_ext(file_path: &Path) -> Result<String> {
+  file_path
     .extension()
     .and_then(|s| s.to_str())
     .map(str::to_ascii_lowercase)
-    .context("file has no extension")
+    .with_context(|| format!("File {} has no extension", file_path.display()))
 }
 
 #[must_use]
@@ -38,101 +40,123 @@ pub fn filesystem_safe_file_name(name: &str) -> String {
     .to_owned()
 }
 
-fn unique_path(path: &Path) -> PathBuf {
-  let mut index = 0;
-  let mut new_path = path.to_path_buf();
+/// Atomically finds an unused path based on `file_path`, trying `file_path`, then
+/// `file_path` with `_1`, `_2`, ... appended before the extension, and creates
+/// an empty file there to *reserve* it. (race free)
+fn create_unique_file(file_path: &Path) -> io::Result<(PathBuf, File)> {
+  let mut candidate = file_path.to_path_buf();
+  let mut n: u64 = 0;
 
-  while new_path.exists() {
-    index += 1;
-    let file_name = path
-      .file_name()
-      .map(|name| name.to_string_lossy())
-      .unwrap_or_default();
-    new_path = path.with_file_name(format!("{file_name}_{index}"));
+  loop {
+    match OpenOptions::new()
+      .write(true)
+      .create_new(true) // O_EXCL on Unix, CREATE_NEW on Windows: atomic test-and-create
+      .open(&candidate)
+    {
+      Ok(file) => return Ok((candidate, file)),
+      Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+        n += 1;
+        candidate = numbered_path(file_path, n);
+      },
+      Err(e) => return Err(e),
+    }
   }
-
-  new_path
 }
 
-/// This function renames the file from the `original_file_path` to the `new_file_path`.
-/// If `new_file_path` already exists the path will be made unique by appending `_<number>`.
-/// The final file path will be returned.
-/// If both `original_file_path` and `new_file_path` are not provided this function errors.
-/// If both `original_file_path` and `new_file_path` are the same, this function is a no-op if `dirty_contents` is false.
-///
-/// If `dirty_contents` is true, `contents_fn` will be invoked and written to the output file.
-pub fn write_or_rename(
-  original_file_path: Option<impl AsRef<Path>>,
-  new_file_path: Option<impl AsRef<Path>>,
-  dirty_contents: bool,
-  contents_fn: impl FnOnce(&mut dyn Write, &Path) -> Result<()>,
-) -> Result<PathBuf> {
-  let original = original_file_path.as_ref().map(|path| path.as_ref());
-  let new = new_file_path.as_ref().map(|path| path.as_ref());
-
-  if original.is_none() && new.is_none() {
-    bail!("Both the original_file_path and the new_file_path are None!")
-  }
-
-  let output = new.or(original).expect("checked above");
-
-  if !dirty_contents {
-    if let Some(original) = original {
-      if original == output {
-        return Ok(output.to_path_buf());
-      }
-
-      let final_path = if output.exists() {
-        unique_path(output)
-      } else {
-        output.to_path_buf()
-      };
-
-      fs::rename(original, &final_path).with_context(|| {
-        format!(
-          "Failed to rename file {} to {}",
-          original.display(),
-          final_path.display()
-        )
-      })?;
-
-      return Ok(final_path);
-    }
-
-    return Ok(output.to_path_buf());
-  }
-
-  let final_path = if let Some(original) = original {
-    if original != output && output.exists() {
-      unique_path(output)
-    } else {
-      output.to_path_buf()
-    }
-  } else if output.exists() {
-    unique_path(output)
-  } else {
-    output.to_path_buf()
+/// Builds `<stem>_<n><.ext>` next to `file_path`.
+#[must_use]
+fn numbered_path(file_path: &Path, n: u64) -> PathBuf {
+  let stem = file_path
+    .file_stem()
+    .and_then(OsStr::to_str)
+    .unwrap_or("file");
+  let name = match file_path.extension().and_then(OsStr::to_str) {
+    Some(ext) => format!("{stem}_{n}.{ext}"),
+    None => format!("{stem}_{n}"),
   };
+  file_path.with_file_name(name)
+}
 
-  {
-    let context = || format!("Failed to write file {}", final_path.display());
-    let file = File::create(&final_path).with_context(context)?;
-    let mut writer = BufWriter::new(file);
+/// Renames `original_file_path` to `renamed_file_path`. If a file already
+/// exists at `renamed_file_path`, a numeric suffix (`_1`, `_2`, ...) is
+/// appended until a free name is found. (race free)
+///
+/// - If both paths are given, `original_file_path` is moved onto the
+///   resolved unique path.
+/// - If `original_file_path` is `None`, there is nothing to move; the
+///   unique name is still reserved on disk (as an empty file) and
+///   returned, so the caller gets the same TOCTOU-free guarantee when
+///   they go on to create that file themselves.
+/// - If `renamed_file_path` is `None`, there's no rename target: the
+///   original path (if any) is returned unchanged.
+/// - If neither is given, an error is returned.
+pub fn smart_rename(
+  original_file_path: Option<impl AsRef<Path>>,
+  renamed_file_path: Option<impl AsRef<Path>>,
+) -> Result<PathBuf> {
+  let renamed_file_path = match renamed_file_path {
+    Some(p) => p,
+    None => {
+      return original_file_path
+        .map(|p| p.as_ref().to_path_buf())
+        .ok_or_else(|| {
+          anyhow!(
+            "smart_rename: at least one of original_file_path or renamed_file_path must be set"
+          )
+        });
+    },
+  };
+  let renamed_file_path = renamed_file_path.as_ref();
 
-    contents_fn(&mut writer, &final_path).with_context(context)?;
+  let original_file_path = match original_file_path {
+    Some(p) => p,
+    None => {
+      // Nothing to move - just reserve a unique name at/near renamed_file_path.
+      let (reserved, _file) = create_unique_file(renamed_file_path)
+        .with_context(|| format!("failed to reserve a unique path near {renamed_file_path:?}"))?;
+      return Ok(reserved);
+    },
+  };
+  let original_file_path = original_file_path.as_ref();
 
-    // BufWriter only flushes on drop or on explicit `flush`. Flush
-    // explicitly so we can propagate errors (a dropped BufWriter
-    // swallows I/O failures).
-    writer.flush().with_context(context)?;
+  if original_file_path == renamed_file_path {
+    return Ok(original_file_path.to_path_buf());
   }
 
-  if let Some(original) = original {
-    if original != final_path.as_path() {
-      fs::remove_file(original)
-        .with_context(|| format!("Failed to remove original file {}", original.display()))?;
-    }
-  }
+  // Atomically reserve a free slot at/near renamed_file_path...
+  let (target, placeholder) = create_unique_file(renamed_file_path)
+    .with_context(|| format!("failed to reserve a unique path near {renamed_file_path:?}"))?;
+  drop(placeholder); // close it before we overwrite it via rename
 
-  Ok(final_path)
+  // ...then move the real file onto it. fs::rename replaces the
+  // (empty, ours) placeholder atomically on both Unix and Windows.
+  fs::rename(original_file_path, &target)
+    .with_context(|| format!("failed to rename {original_file_path:?} to {target:?}"))?;
+
+  Ok(target)
+}
+
+/// Safely overwrites `file_path`: A reader can never observe a partially-written `file_path`.
+///
+/// `temp_dir` must exist and be on the same filesystem as `file_path`.
+pub fn safe_overwrite(
+  file_path: &Path,
+  contents_fn: impl FnOnce(&mut dyn Write) -> Result<()>,
+  temp_dir: &Path,
+) -> Result<()> {
+  let mut temp_file = NamedTempFile::new_in(temp_dir)
+    .with_context(|| format!("failed to create temp file in {temp_dir:?}"))?;
+
+  contents_fn(&mut temp_file as &mut dyn Write)
+    .with_context(|| format!("failed to write contents to {:?}", temp_file.path()))?;
+  temp_file
+    .as_file()
+    .sync_all()
+    .with_context(|| format!("failed to fsync {:?}", temp_file.path()))?;
+
+  temp_file.persist(file_path).map_err(|e| {
+    anyhow!(e.error).context(format!("failed to persist temp file to {file_path:?}"))
+  })?;
+
+  Ok(())
 }

@@ -9,3 +9,6 @@ pub use has_tools::*;
 
 mod lofty_tagged_file_with_path;
 pub use lofty_tagged_file_with_path::*;
+
+mod tie_command_to_self;
+pub use tie_command_to_self::*;

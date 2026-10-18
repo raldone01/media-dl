@@ -12,6 +12,9 @@ Implement cooldowns and retries (exponential bounded backoff).
 Implement watching a cookies.txt until it is replaced with new ones.
 Ask the user to change them when it fails.
 
+TODO: REMOVE THE FORMAT HINT its useless anyways maybe better to add a playlist hint. i mean we still need the hints for untracked files but it would probably be better to have like a TYPE hint like AUDIO or VIDEO or something like that don't know but we must handle them
+TODO: rename untracked files
+
 Wanted log output:
 ```
 SECTION_START: Reading existing files and running playlist reconcile.

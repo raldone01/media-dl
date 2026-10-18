@@ -5,6 +5,7 @@ mod media_dl;
 mod media_library;
 mod utils;
 mod yt;
+mod yt_dlp;
 
 use anyhow::Error;
 use anyhow::anyhow;
@@ -92,7 +93,14 @@ fn new_argparser() -> clap::Command {
     )
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
+  if let Err(err) = run() {
+    eprintln!("{:#}", err);
+    exit(1);
+  }
+}
+
+fn run() -> anyhow::Result<()> {
   let matches = new_argparser().get_matches();
 
   // set the correct log level

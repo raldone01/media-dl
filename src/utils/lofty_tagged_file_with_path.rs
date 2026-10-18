@@ -1,16 +1,18 @@
 use std::{
   error::Error,
+  fs,
   path::{Path, PathBuf},
   time::Duration,
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow};
 use lofty::{
   config::WriteOptions,
   file::{AudioFile as _, TaggedFile, TaggedFileExt as _},
-  probe::Probe,
+  read_from_path,
   tag::Tag,
 };
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -22,7 +24,7 @@ pub enum PatchTagError<E: Error> {
 }
 
 pub struct TaggedFileWithPath {
-  file_path: Option<PathBuf>,
+  file_path: PathBuf,
   // BoundTaggedFile exists but we can't get access to file_path for logging errors and warnings so we roll our own.
   tagged_file: TaggedFile,
 }
@@ -30,14 +32,17 @@ pub struct TaggedFileWithPath {
 impl TaggedFileWithPath {
   #[must_use]
   pub fn open(file_path: &Path) -> Result<Self> {
-    let tagged_file = Probe::open(file_path)
-      .with_context(|| format!("failed to open {}", file_path.display()))?
-      .read()
-      .with_context(|| format!("failed to read tags from {}", file_path.display()))?;
+    let tagged_file = read_from_path(file_path)
+      .with_context(|| format!("failed to open {}", file_path.display()))?;
     Ok(Self {
-      file_path: Some(file_path.to_owned()),
+      file_path: file_path.to_owned(),
       tagged_file,
     })
+  }
+
+  #[must_use]
+  pub fn file_path(&self) -> &Path {
+    &self.file_path
   }
 
   pub fn patch_tag<E: Error>(
@@ -68,13 +73,32 @@ impl TaggedFileWithPath {
     self.tagged_file.properties().duration()
   }
 
-  pub fn overwrite(&self) -> Result<()> {
-    let Some(file_path) = self.file_path.as_deref() else {
-      bail!("No file_path associated with the TaggedFile.");
-    };
+  pub fn overwrite(&self, temp_dir: &Path) -> Result<()> {
+    let file_path = &self.file_path;
+    let temp_file = NamedTempFile::new_in(temp_dir)
+      .with_context(|| format!("failed to create temp file in {temp_dir:?}"))?;
+
+    fs::copy(file_path, &temp_file)?;
+
     self
       .tagged_file
-      .save_to_path(file_path, WriteOptions::default())
-      .with_context(|| format!("failed to write tags to {}", file_path.display()))
+      .save_to_path(&temp_file, WriteOptions::default())
+      .with_context(|| {
+        format!(
+          "failed to write tags to tempfile {}",
+          temp_file.path().display()
+        )
+      })?;
+
+    temp_file
+      .as_file()
+      .sync_all()
+      .with_context(|| format!("failed to fsync {:?}", temp_file.path()))?;
+
+    temp_file.persist(file_path).map_err(|e| {
+      anyhow!(e.error).context(format!("failed to persist temp file to {file_path:?}"))
+    })?;
+
+    Ok(())
   }
 }
