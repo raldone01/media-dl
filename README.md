@@ -19,6 +19,7 @@ TODO: rename untracked files
 * TODO: Genres
 * TODO: popularimeter scaled with an exponential based on views?
 * TODO: read browser cookies and maybe cookies.txt?
+* Gracefully detect if python-mutagen is missing on the system installation also overhaul how tool presence is checked
 
 Wanted log output:
 ```

@@ -5,7 +5,7 @@ use anyhow::Context as _;
 const CACHEDIR_TAG_FILE_NAME: &str = "CACHEDIR.TAG";
 const CACHEDIR_TAG_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55";
 
-pub enum CachedirState {
+pub enum CacheDirState {
   IsCacheDir,
   NormalDir,
 }
@@ -16,12 +16,12 @@ pub enum CachedirState {
 pub fn dir_is_cache_dir(
   cache_dir_file_path: &Path,
   app_name: Option<&str>,
-) -> anyhow::Result<CachedirState> {
+) -> anyhow::Result<CacheDirState> {
   let tag_path = cache_dir_file_path.join(CACHEDIR_TAG_FILE_NAME);
 
   let contents = match fs::read_to_string(&tag_path) {
     Ok(contents) => contents,
-    Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(CachedirState::NormalDir),
+    Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(CacheDirState::NormalDir),
     Err(err) => {
       return Err(err).with_context(|| {
         format!(
@@ -34,17 +34,17 @@ pub fn dir_is_cache_dir(
 
   let mut lines = contents.lines();
   if lines.next() != Some(CACHEDIR_TAG_SIGNATURE) {
-    return Ok(CachedirState::NormalDir);
+    return Ok(CacheDirState::NormalDir);
   }
 
   if let Some(app_name) = app_name {
     let expected = format!("# This file is a cache directory tag created by {app_name}.");
     if !lines.any(|line| line == expected.as_str()) {
-      return Ok(CachedirState::NormalDir);
+      return Ok(CacheDirState::NormalDir);
     }
   }
 
-  Ok(CachedirState::IsCacheDir)
+  Ok(CacheDirState::IsCacheDir)
 }
 
 /// Marks the given directory as a cache directory by writing a `CACHEDIR.TAG` file.

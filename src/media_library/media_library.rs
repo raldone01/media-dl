@@ -25,8 +25,8 @@ use crate::media_library::AudioFile;
 use crate::media_library::m3u8::{M3U8Playlist, MediaSource};
 use crate::media_library::resource_id::ResourceId;
 use crate::utils::{
-  file_ext, file_name_as_str, filesystem_safe_file_name, mark_dir_as_cache_dir, safe_overwrite,
-  smart_rename,
+  CacheDirState, dir_is_cache_dir, file_ext, file_name_as_str, filesystem_safe_file_name,
+  mark_dir_as_cache_dir, safe_overwrite, smart_rename,
 };
 use crate::yt::{YtPlaylistMeta, download_yt_audio};
 
@@ -179,6 +179,16 @@ impl<'a> MediaLibrary<'a> {
       },
     };
 
+    if entry.file_type().is_dir()
+      && matches!(
+        dir_is_cache_dir(&entry.path(), Some(CRATE_NAME)),
+        Ok(CacheDirState::IsCacheDir)
+      )
+    {
+      // dir is old cache dir from us
+      trash::delete(entry.path())?;
+    }
+
     if !entry.file_type().is_file() {
       return Ok(None);
     }
@@ -229,7 +239,15 @@ impl<'a> MediaLibrary<'a> {
   ) -> anyhow::Result<Self> {
     fs::create_dir_all(&library_path).context("Failed to create output folder")?;
 
-    let file_entries = WalkDir::new(&library_path).max_depth(1).into_iter();
+    let file_entries = WalkDir::new(&library_path)
+      .max_depth(1)
+      .try_into_iter()
+      .with_context(|| {
+        format!(
+          "Failed to open media library dir: {}",
+          library_path.display()
+        )
+      })?;
 
     let exiting_files: Vec<ExistingFileEntry> = match file_entries
       .par_bridge()

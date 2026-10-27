@@ -22,7 +22,7 @@ use crate::utils::has_ffmpeg;
 use crate::utils::has_ffprobe;
 use crate::utils::has_ytdlp;
 
-pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
+const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 
 const AUDIO_DOWNLOAD_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus", "wav"];
 const VIDEO_DOWNLOAD_FORMATS: &[&str] = &["mkv"];

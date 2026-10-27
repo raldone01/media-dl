@@ -99,7 +99,9 @@ chrono = { version = "0.4", default-features = false, features = [
 ] }
 jwalk = { version = "0.9", default-features = false }
 rayon = { version = "1.10", default-features = false }
-ctrlc = { version = "3.5.2", default-features = false }
+ctrlc = { version = "3.5.2", default-features = false, features = [
+  "termination",
+] }
 regex = { version = "1.11", default-features = false, features = [
   "unicode-case", # Minimal necessary feature
   "unicode-perl", # Minimal necessary feature
@@ -108,9 +110,6 @@ regex = { version = "1.11", default-features = false, features = [
   "perf",         # Improves performance further
 ] }
 anyhow = { version = "1.0", default-features = false, features = [
-  "std", # No idea what this changes. It is not required.
-] }
-libc = { version = "0.2.180", default-features = false, features = [
   "std", # No idea what this changes. It is not required.
 ] }
 url = { version = "2.5.8", features = ["serde"] }
@@ -122,6 +121,7 @@ tempfile = "3.27.0"
 pathdiff = "0.2.3"
 nix = { version = "0.31.3", features = ["signal", "process"] }
 process-wrap = { version = "10.0.1", features = ["std"] }
+trash = "5.2.9"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_System_Threading"] }

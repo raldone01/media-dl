@@ -4,7 +4,7 @@ use std::{
   collections::VecDeque,
   ffi::OsStr,
   io::{self, BufRead, BufReader, Read},
-  process::{Child, Command, ExitStatus, Stdio},
+  process::{Command, ExitStatus, Stdio},
   sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, RecvTimeoutError, Sender},
@@ -16,7 +16,7 @@ use std::{
 use process_wrap::std::*;
 use serde::{Deserialize, de::DeserializeOwned};
 
-use crate::utils::tie_command_to_self;
+use crate::utils::tie_command_to_thread;
 
 const DL_PREFIX: &str = "[ytdlp-dl]";
 const PP_PREFIX: &str = "[ytdlp-pp]";
@@ -103,7 +103,7 @@ impl<'a> YtDlp<'a> {
   pub fn new() -> Self {
     let mut cmd = Command::new("yt-dlp");
     // ensure the process dies with us on unix
-    tie_command_to_self(&mut cmd);
+    tie_command_to_thread(&mut cmd);
     cmd
       .args(["--newline", "--progress"])
       .arg("--progress-template")
