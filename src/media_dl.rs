@@ -52,7 +52,9 @@ impl MediaDl {
     let mut media_library =
       MediaLibrary::new(self.media_library_dir.clone(), &lrclib, &self.should_exit)?;
     media_library.add_urls(self.audio_urls.iter(), &self.audio_download_format)?;
-    media_library.download(&self.audio_download_format)?;
+    if !self.no_network {
+      media_library.download(&self.audio_download_format)?;
+    }
     media_library.write()?;
     Ok(())
   }

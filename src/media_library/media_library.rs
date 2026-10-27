@@ -241,6 +241,7 @@ impl<'a> MediaLibrary<'a> {
 
     let file_entries = WalkDir::new(&library_path)
       .max_depth(1)
+      .skip_hidden(false)
       .try_into_iter()
       .with_context(|| {
         format!(
