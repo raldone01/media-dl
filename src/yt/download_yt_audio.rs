@@ -3,22 +3,35 @@ use std::{
   sync::atomic::AtomicBool,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result, bail};
 
 use crate::{
-  media_library::AudioFile,
+  media_library::{AudioFile, AudioSubtype, MimeType},
   utils::{TaggedFileWithPath, smart_rename},
   yt::{YtMediaId, embed_yt_id_tag},
   yt_dlp::YtDlp,
 };
 
+fn convert_mime_type_to_yt_dlp_format(mime_type: MimeType) -> Result<&'static str> {
+  Ok(match mime_type {
+    MimeType::Audio(AudioSubtype::Mpeg) => "mp3",
+    MimeType::Audio(AudioSubtype::Mp4) => "mp4",
+    MimeType::Audio(AudioSubtype::Flac) => "flac",
+    MimeType::Audio(AudioSubtype::Opus) => "opus",
+    MimeType::Audio(AudioSubtype::Wav) => "wav",
+    _ => bail!("YT music audio download does not accept mime type: {mime_type:?}"),
+  })
+}
+
 pub fn download_yt_audio(
   output_dir: &Path,
   yt_media_id: &YtMediaId,
-  format: &str,
+  format: MimeType,
   abort_token: &AtomicBool,
   temp_dir: &Path,
 ) -> Result<AudioFile> {
+  let format = convert_mime_type_to_yt_dlp_format(format)?;
+
   let output_template = temp_dir.join("%(title)s - %(artist,uploader)s.%(ext)s");
   let yt_url = yt_media_id.to_url();
 

@@ -7,8 +7,7 @@ mod utils;
 mod yt;
 mod yt_dlp;
 
-use anyhow::Error;
-use anyhow::anyhow;
+use anyhow::bail;
 use clap::ArgAction::SetFalse;
 use clap::builder::PossibleValuesParser;
 use clap::{Arg, command, value_parser};
@@ -18,6 +17,7 @@ use url::Url;
 
 use crate::logging::setup_logging;
 use crate::media_dl::MediaDl;
+use crate::media_library::{AudioSubtype, MimeType, VideoSubtype};
 use crate::utils::has_ffmpeg;
 use crate::utils::has_ffprobe;
 use crate::utils::has_ytdlp;
@@ -27,14 +27,26 @@ const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 const AUDIO_DOWNLOAD_FORMATS: &[&str] = &["mp3", "m4a", "flac", "opus", "wav"];
 const VIDEO_DOWNLOAD_FORMATS: &[&str] = &["mkv"];
 
-fn https_url(value: &str) -> Result<Url, Error> {
+fn https_url(value: &str) -> anyhow::Result<Url> {
   let url = Url::parse(value)?;
 
   if url.scheme() != "https" {
-    return Err(anyhow!("URL must use HTTPS"));
+    bail!("URL {url} must use HTTPS");
   }
 
   Ok(url)
+}
+
+fn convert_format_to_mime_type(format_str: &str) -> anyhow::Result<MimeType> {
+  Ok(match format_str {
+    "mp3" => MimeType::Audio(AudioSubtype::Mpeg),
+    "m4a" => MimeType::Audio(AudioSubtype::Mp4),
+    "flac" => MimeType::Audio(AudioSubtype::Flac),
+    "opus" => MimeType::Audio(AudioSubtype::Opus),
+    "wav" => MimeType::Audio(AudioSubtype::Wav),
+    "mkv" => MimeType::Video(VideoSubtype::Mkv),
+    other => bail!("Failed to convert {format_str} to a MIME type."),
+  })
 }
 
 #[must_use]
@@ -59,10 +71,10 @@ fn new_argparser() -> clap::Command {
         .value_parser(https_url),
     )
     .arg(
-      Arg::new("audio_format")
-        .long("audio-format")
-        .help("Audio format")
-        .value_name("audio-format")
+      Arg::new("default_audio_format")
+        .long("default-audio-format")
+        .help("Default audio format")
+        .value_name("default-audio-format")
         .value_parser(PossibleValuesParser::new(AUDIO_DOWNLOAD_FORMATS))
         .default_value("opus"),
     )
@@ -75,10 +87,10 @@ fn new_argparser() -> clap::Command {
         .value_parser(https_url),
     )
     .arg(
-      Arg::new("video_format")
-        .long("video-format")
-        .help("Video format")
-        .value_name("video-format")
+      Arg::new("default_video_format")
+        .long("default-video-format")
+        .help("Default video format")
+        .value_name("default-video-format")
         .value_parser(PossibleValuesParser::new(VIDEO_DOWNLOAD_FORMATS))
         .default_value("mkv"),
     )
@@ -140,20 +152,22 @@ fn run() -> anyhow::Result<()> {
     .chain(positional_audio_urls)
     .cloned()
     .collect();
-  let audio_download_format = matches
-    .get_one::<String>("audio_format")
-    .expect("Has a default value")
-    .clone();
+  let default_audio_download_format = convert_format_to_mime_type(
+    matches
+      .get_one::<String>("default_audio_format")
+      .expect("Has a default value"),
+  )?;
 
   let video_urls = matches
     .get_many::<Url>("video_urls")
     .unwrap_or_default()
     .cloned()
     .collect();
-  let video_download_format = matches
-    .get_one::<String>("video_format")
-    .expect("Has a default value")
-    .clone();
+  let default_video_download_format = convert_format_to_mime_type(
+    matches
+      .get_one::<String>("default_video_format")
+      .expect("Has a default value"),
+  )?;
 
   let media_library_dir = matches
     .get_one::<PathBuf>("media_library_dir")
@@ -182,9 +196,9 @@ fn run() -> anyhow::Result<()> {
 
   let media_dl = Arc::new(MediaDl::new(
     audio_urls,
-    audio_download_format,
+    default_audio_download_format,
     video_urls,
-    video_download_format,
+    default_video_download_format,
     media_library_dir,
     cookies_txt_file,
     no_network,

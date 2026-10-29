@@ -7,16 +7,19 @@ use std::{
 use anyhow::Context as _;
 use url::Url;
 
-use crate::{lyrics::LrclibClient, media_library::MediaLibrary};
+use crate::{
+  lyrics::LrclibClient,
+  media_library::{MediaLibrary, MimeType},
+};
 
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 pub struct MediaDl {
   audio_urls: BTreeSet<Url>,
-  audio_download_format: String,
+  default_audio_download_format: MimeType,
 
   video_urls: BTreeSet<Url>,
-  video_download_format: String,
+  default_video_download_format: MimeType,
 
   media_library_dir: PathBuf,
   cookies: PathBuf,
@@ -28,18 +31,18 @@ impl MediaDl {
   #[must_use]
   pub fn new(
     audio_urls: BTreeSet<Url>,
-    audio_download_format: String,
+    default_audio_download_format: MimeType,
     video_urls: BTreeSet<Url>,
-    video_download_format: String,
+    default_video_download_format: MimeType,
     media_library_dir: PathBuf,
     cookies: PathBuf,
     no_network: bool,
   ) -> Self {
     Self {
       audio_urls,
-      audio_download_format,
+      default_audio_download_format,
       video_urls,
-      video_download_format,
+      default_video_download_format,
       media_library_dir,
       cookies,
       no_network,
@@ -51,9 +54,9 @@ impl MediaDl {
     let lrclib = LrclibClient::new(USER_AGENT).context("Failed to initialize LRCLIB client")?;
     let mut media_library =
       MediaLibrary::new(self.media_library_dir.clone(), &lrclib, &self.should_exit)?;
-    media_library.add_urls(self.audio_urls.iter(), &self.audio_download_format)?;
+    media_library.add_urls(self.audio_urls.iter(), self.default_audio_download_format)?;
     if !self.no_network {
-      media_library.download(&self.audio_download_format)?;
+      media_library.download(self.default_audio_download_format)?;
     }
     media_library.write()?;
     Ok(())

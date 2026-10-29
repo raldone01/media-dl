@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow};
 use lofty::{
   config::WriteOptions,
-  file::{AudioFile as _, TaggedFile, TaggedFileExt as _},
+  file::{AudioFile as _, FileType, TaggedFile, TaggedFileExt as _},
   read_from_path,
   tag::Tag,
 };
@@ -71,6 +71,11 @@ impl TaggedFileWithPath {
   #[must_use]
   pub fn duration(&self) -> Duration {
     self.tagged_file.properties().duration()
+  }
+
+  #[must_use]
+  pub fn file_type(&self) -> FileType {
+    self.tagged_file.file_type()
   }
 
   pub fn overwrite(&self, temp_dir: &Path) -> Result<()> {

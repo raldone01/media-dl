@@ -1,7 +1,7 @@
-use core::fmt;
 use std::{
   borrow::Cow,
   ffi::OsStr,
+  fmt,
   path::{Path, PathBuf},
   time::Duration,
 };
@@ -11,26 +11,105 @@ use lofty::tag::Accessor as _;
 
 use crate::{
   lyrics::{LrcLibError, LrclibClient, Lyrics, LyricsPresence, TrackQuery, embed_lyrics_tag},
-  media_library::resource_id::ResourceId,
+  media_library::{
+    mime_type::{AudioSubtype, MimeType},
+    resource_id::ResourceId,
+  },
   utils::{
     AbsoluteFilePath, TaggedFileWithPath, file_ext, filesystem_safe_file_name, smart_rename,
   },
   yt::yt_id_from_tag,
 };
 
+pub trait MediaItem: fmt::Display {
+  fn resource_id(&self) -> &ResourceId;
+  fn mime_type(&self) -> MimeType;
+  fn original_file_path(&self) -> &AbsoluteFilePath;
+  /// TODO: renaming needs more thought and coordination
+  fn write(&mut self) -> anyhow::Result<()>;
+}
+
 pub enum MediaFile {
   Audio(AudioFile),
+  // Video(VideoFile),
+}
+
+macro_rules! delegate {
+  ($self:expr, $inner:ident => $body:expr) => {
+    match $self {
+      MediaFile::Audio($inner) => $body,
+      // MediaFile::Video($inner) => $body,
+    }
+  };
+}
+
+impl MediaFile {
+  #[must_use]
+  pub fn resource_id(&self) -> &ResourceId {
+    delegate!(self, inner => inner.resource_id())
+  }
+
+  #[must_use]
+  pub fn mime_type(&self) -> MimeType {
+    delegate!(self, inner => inner.mime_type())
+  }
+
+  #[must_use]
+  pub fn original_file_path(&self) -> &AbsoluteFilePath {
+    delegate!(self, inner => inner.original_file_path())
+  }
+
+  pub fn write(&mut self) -> anyhow::Result<()> {
+    delegate!(self, inner => inner.write())
+  }
+
+  pub fn check_media_meta(&mut self, lrclib: &LrclibClient, temp_dir: &Path) -> anyhow::Result<()> {
+    match self {
+      MediaFile::Audio(audio_file) => audio_file.check_media_meta(lrclib, temp_dir),
+    }
+  }
+}
+
+impl fmt::Display for MediaFile {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    delegate!(self, inner => fmt::Display::fmt(inner, f))
+  }
 }
 
 pub struct AudioFile {
   original_file_path: AbsoluteFilePath,
   renamed_file_path: Option<AbsoluteFilePath>,
   resource_id: ResourceId,
+  mime_type: AudioSubtype,
   lyrics_presence: LyricsPresence,
   title: Option<String>,
   artist: Option<String>,
   album: Option<String>,
   duration: Duration,
+}
+
+impl MediaItem for AudioFile {
+  fn resource_id(&self) -> &ResourceId {
+    &self.resource_id
+  }
+
+  fn mime_type(&self) -> MimeType {
+    MimeType::Audio(self.mime_type)
+  }
+
+  fn original_file_path(&self) -> &AbsoluteFilePath {
+    &self.original_file_path
+  }
+
+  fn write(&mut self) -> anyhow::Result<()> {
+    self.original_file_path = AbsoluteFilePath::new(smart_rename(
+      Some(self.original_file_path.as_path()),
+      self.renamed_file_path.as_ref().map(|p| p.as_path()),
+    )?)
+    .expect("Was a absolute file path");
+    self.renamed_file_path = None;
+    Ok(())
+  }
 }
 
 impl AudioFile {
@@ -44,7 +123,7 @@ impl AudioFile {
     let Some(tag) = tagged_file.tag() else {
       bail!("No tag found in the file")
     };
-    let resource_id = yt_id_from_tag(tag).map(|yt_id| ResourceId::YtMediaId(yt_id));
+    let resource_id = yt_id_from_tag(tag).map(ResourceId::YtMediaId);
     let resource_id = match resource_id {
       Some(resource_id) => resource_id,
       None => {
@@ -54,6 +133,9 @@ impl AudioFile {
         ResourceId::LocalFile(absolute_file_path)
       },
     };
+
+    let mime_type = AudioSubtype::try_from(tagged_file.file_type())?;
+
     let lyrics_presence = LyricsPresence::from_tag(tag);
     let title = tag.title().map(Cow::into_owned);
     let artist = tag.artist().map(Cow::into_owned);
@@ -66,6 +148,7 @@ impl AudioFile {
       original_file_path: absolute_path,
       renamed_file_path: None,
       resource_id,
+      mime_type,
       lyrics_presence,
       title,
       artist,
@@ -184,30 +267,15 @@ impl AudioFile {
 
   #[must_use]
   pub fn final_file_path(&self) -> &AbsoluteFilePath {
-    &self
+    self
       .renamed_file_path
       .as_ref()
       .unwrap_or(&self.original_file_path)
   }
-
-  #[must_use]
-  pub fn resource_id(&self) -> &ResourceId {
-    &self.resource_id
-  }
-
-  pub fn write(&mut self) -> anyhow::Result<()> {
-    self.original_file_path = AbsoluteFilePath::new(smart_rename(
-      Some(self.original_file_path.as_path()),
-      self.renamed_file_path.as_ref().map(|p| p.as_path()),
-    )?)
-    .expect("Was a absolute file path");
-    self.renamed_file_path = None;
-    Ok(())
-  }
 }
 
 impl fmt::Display for AudioFile {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let pretty_name = self.pretty_name();
 
     write!(

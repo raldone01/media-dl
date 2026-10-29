@@ -15,3 +15,7 @@ pub use lofty_tagged_file_with_path::*;
 
 mod tie_command_to_thread;
 pub use tie_command_to_thread::*;
+
+/// A marker type used to indicate that an operation should be cancelled.
+#[derive(Debug, Clone, Copy)]
+pub struct OperationCancelled;

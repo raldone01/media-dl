@@ -4,8 +4,10 @@
 //! #EXTM3U
 //! # Indicates this local playlist tracks a remote playlist.
 //! #EXTPLAYLIST_REMOTE <URL>
+//! # Sets the default format the media should be downloaded as.
+//! #EXTPLAYLIST_REMOTE_DEFAULT_FORMAT <FORMAT>
 //! # Indicates that remote download should be skipped.
-//! # Can also be used to mark playlists that intentionally don't track a remote playlist
+//! # Can also be used to mark playlists that intentionally don't track a remote playlist.
 //! #EXTPLAYLIST_REMOTE_SKIP_DOWNLOAD
 //! song1.mp3
 //! # some comment
@@ -35,6 +37,7 @@ use anyhow::bail;
 use thiserror::Error;
 use url::{ParseError, Url};
 
+use crate::media_library::mime_type::MimeType;
 use crate::media_library::resource_id::ResourceId;
 use crate::utils::AbsoluteFilePath;
 
@@ -119,6 +122,26 @@ impl MediaEntry {
       _ => None,
     })
   }
+
+  #[must_use]
+  pub fn remote_format(&self) -> Option<MimeType> {
+    self.meta.iter().find_map(|item| match item {
+      MediaMeta::ExtComment(ExtMediaComment::RemoteFormat(format)) => Some(*format),
+      _ => None,
+    })
+  }
+
+  #[must_use]
+  pub fn remote_skip_download(&self) -> bool {
+    self
+      .meta
+      .iter()
+      .find(|item| match item {
+        MediaMeta::ExtComment(ExtMediaComment::SkipRemoteDownloadMarker) => true,
+        _ => false,
+      })
+      .is_some()
+  }
 }
 
 pub enum MediaMeta {
@@ -130,24 +153,82 @@ pub enum MediaMeta {
 pub enum ExtPlaylistComment {
   EXTM3UMarker,
   RemotePlaylist(Url),
-  SkipRemoteDownloadPlaylist,
+  RemotePlaylistDefaultFormat(MimeType),
+  RemoteSkipPlaylistDownload,
   UnknownExtComment(String),
 }
 
 impl ExtPlaylistComment {
+  /// Parse a playlist-level `#EXT…` line.
+  ///
+  /// Returns `Ok(Some(_))` only for tags with a playlist-level prefix
+  /// (`#EXTPLAYLIST_*` or `#EXTM3U`). Other `#EXT…` tags return `Ok(None)`
+  /// so the caller can decide whether they're media-level or unclassified.
+  ///
+  /// Unknown `#EXTPLAYLIST_*` tags are captured as
+  /// [`ExtPlaylistComment::UnknownExtComment`] so they round-trip untouched.
+  fn parse(line: &str) -> Result<Option<Self>, M3U8PlaylistParseError> {
+    if let Some(rest) = line.strip_prefix("#EXTPLAYLIST_REMOTE") {
+      // Only treat this as `#EXTPLAYLIST_REMOTE <url>` when the following
+      // character is whitespace (or the tag is bare, matching the
+      // original error path).
+      if rest.chars().next().map_or(true, char::is_whitespace) {
+        let url = parse_url_from_rest(rest, "#EXTPLAYLIST_REMOTE")?;
+        return Ok(Some(Self::RemotePlaylist(url)));
+      }
+    }
+
+    if let Some(rest) = line.strip_prefix("#EXTMEDIA_REMOTE_FORMAT") {
+      if rest.is_empty() {
+        return Err(M3U8PlaylistParseError::RemoteFormatMissing);
+      }
+
+      if rest.chars().next().map_or(false, char::is_whitespace) {
+        let format = rest.trim();
+        if format.is_empty() {
+          return Err(M3U8PlaylistParseError::RemoteFormatMissing);
+        }
+        let mime_type = MimeType::try_from(format)
+          .map_err(|error| M3U8PlaylistParseError::FormatMimeTypeParseError(error))?;
+        return Ok(Some(Self::RemotePlaylistDefaultFormat(mime_type)));
+      }
+    }
+
+    if line.trim_end() == "#EXTPLAYLIST_REMOTE_SKIP_DOWNLOAD" {
+      return Ok(Some(Self::RemoteSkipPlaylistDownload));
+    }
+
+    if line.trim_end() == "#EXTM3U" {
+      return Ok(Some(Self::EXTM3UMarker));
+    }
+
+    if line.starts_with("#EXTPLAYLIST_") {
+      return Ok(Some(Self::UnknownExtComment(line[1..].to_string())));
+    }
+
+    Ok(None)
+  }
+
   fn serialize(&self, out: &mut impl Write) -> io::Result<()> {
     match self {
-      ExtPlaylistComment::EXTM3UMarker => {
+      Self::EXTM3UMarker => {
         // ignore additional stray markers
         // we always add one at the start
       },
-      ExtPlaylistComment::RemotePlaylist(url) => {
+      Self::RemotePlaylist(url) => {
         writeln!(out, "#EXTPLAYLIST_REMOTE {}", url.as_str())?;
       },
-      ExtPlaylistComment::SkipRemoteDownloadPlaylist => {
+      Self::RemotePlaylistDefaultFormat(format) => {
+        writeln!(
+          out,
+          "#EXTPLAYLIST_REMOTE_DEFAULT_FORMAT {}",
+          format.as_str()
+        )?;
+      },
+      Self::RemoteSkipPlaylistDownload => {
         writeln!(out, "#EXTPLAYLIST_REMOTE_SKIP_DOWNLOAD")?;
       },
-      ExtPlaylistComment::UnknownExtComment(c) => {
+      Self::UnknownExtComment(c) => {
         writeln!(out, "#{c}")?;
       },
     }
@@ -160,7 +241,7 @@ pub enum ExtMediaComment {
   LocalAdditionMarker { confirmed: bool },
   SkipRemoteDownloadMarker,
   RemoteMedia(Url),
-  RemoteFormat(String),
+  RemoteFormat(MimeType),
   UnknownExtComment(String),
 }
 
@@ -181,7 +262,7 @@ impl ExtMediaComment {
         writeln!(out, "#EXTMEDIA_REMOTE {}", url.as_str())?;
       },
       Self::RemoteFormat(format) => {
-        writeln!(out, "#EXTMEDIA_REMOTE_FORMAT {format}")?;
+        writeln!(out, "#EXTMEDIA_REMOTE_FORMAT {}", format.as_str())?;
       },
       Self::UnknownExtComment(c) => {
         writeln!(out, "#{c}")?;
@@ -236,7 +317,9 @@ impl ExtMediaComment {
         if format.is_empty() {
           return Err(M3U8PlaylistParseError::RemoteFormatMissing);
         }
-        return Ok(Some(Self::RemoteFormat(format.to_string())));
+        let mime_type = MimeType::try_from(format)
+          .map_err(|error| M3U8PlaylistParseError::FormatMimeTypeParseError(error))?;
+        return Ok(Some(Self::RemoteFormat(mime_type)));
       }
     }
 
@@ -261,8 +344,10 @@ pub enum M3U8PlaylistParseError {
   },
   #[error("media metadata without a following media entry")]
   DanglingMediaMetadata,
-  #[error("#EXTMEDIA_REMOTE_FORMAT requires a format value")]
+  #[error("#EXT*_REMOTE_FORMAT requires a format value")]
   RemoteFormatMissing,
+  #[error("Failed to parse mime type for format {0}")]
+  FormatMimeTypeParseError(#[source] anyhow::Error),
   #[error("invalid #EXTMEDIA_LOCAL_ADDITION value: {value:?}")]
   InvalidLocalAddition { value: String },
   /// Two instances of a tag that may only appear once (per playlist /
@@ -282,12 +367,12 @@ impl M3U8Playlist {
       !matches!(
         meta,
         PlaylistMeta::PlaylistExt(
-          ExtPlaylistComment::RemotePlaylist(_) | ExtPlaylistComment::SkipRemoteDownloadPlaylist
+          ExtPlaylistComment::RemotePlaylist(..) | ExtPlaylistComment::RemoteSkipPlaylistDownload
         )
       )
     });
 
-    Ok(match resource_id {
+    match resource_id {
       ResourceId::YtPlaylistId(yt_id) => {
         self.playlist_meta.push(PlaylistMeta::PlaylistExt(
           ExtPlaylistComment::RemotePlaylist(yt_id.to_url()),
@@ -298,15 +383,17 @@ impl M3U8Playlist {
           ExtPlaylistComment::RemotePlaylist(url),
         ));
       },
-      ResourceId::LocalFile(_) => {
+      ResourceId::LocalFile(..) => {
         self.playlist_meta.push(PlaylistMeta::PlaylistExt(
-          ExtPlaylistComment::SkipRemoteDownloadPlaylist,
+          ExtPlaylistComment::RemoteSkipPlaylistDownload,
         ));
       },
       other_id => bail!(format!(
         "Can't set {other_id:?} as a remote playlist source."
       )),
-    })
+    }
+
+    Ok(())
   }
 
   #[must_use]
@@ -321,6 +408,45 @@ impl M3U8Playlist {
         _ => None,
       });
     resource_id
+  }
+
+  pub fn set_remote_default_format(&mut self, default_format: MimeType) {
+    // Drop any previous default format.
+    self.playlist_meta.retain(|playlist_meta| {
+      !matches!(
+        playlist_meta,
+        PlaylistMeta::PlaylistExt(ExtPlaylistComment::RemotePlaylistDefaultFormat(..))
+      )
+    });
+
+    self.playlist_meta.push(PlaylistMeta::PlaylistExt(
+      ExtPlaylistComment::RemotePlaylistDefaultFormat(default_format),
+    ))
+  }
+
+  #[must_use]
+  pub fn remote_default_format(&self) -> Option<MimeType> {
+    self
+      .playlist_meta
+      .iter()
+      .find_map(|playlist_meta| match playlist_meta {
+        PlaylistMeta::PlaylistExt(ExtPlaylistComment::RemotePlaylistDefaultFormat(format)) => {
+          Some(*format)
+        },
+        _ => None,
+      })
+  }
+
+  #[must_use]
+  pub fn remote_skip_download(&self) -> bool {
+    self
+      .playlist_meta
+      .iter()
+      .find(|playlist_meta| match playlist_meta {
+        PlaylistMeta::PlaylistExt(ExtPlaylistComment::RemoteSkipPlaylistDownload) => true,
+        _ => false,
+      })
+      .is_some()
   }
 
   /// Parse a playlist from any buffered byte stream.
@@ -360,7 +486,7 @@ impl M3U8Playlist {
       if line.starts_with('#') {
         // Playlist-level EXT tags are recognized in *any* context
         // and always promote to `playlist_meta`.
-        if let Some(ext) = parse_playlist_ext(line)? {
+        if let Some(ext) = ExtPlaylistComment::parse(line)? {
           push_playlist_ext_checked(&mut playlist_meta, ext)?;
           continue;
         }
@@ -490,7 +616,7 @@ impl M3U8Playlist {
       .find(|media_entry| media_entry.resource_id() == *resource_id)
   }
 
-  pub fn add_media_entry(&mut self, url: Url, format: String) {
+  pub fn add_media_entry(&mut self, url: Url, format: MimeType) {
     self.entries.push(MediaEntry {
       media_source: MediaSource::Url(url.clone()),
       meta: vec![
@@ -500,11 +626,17 @@ impl M3U8Playlist {
     });
   }
 
-  pub fn update_playlist_from_remote<I, R>(&mut self, remote_playlist_items: I, format: &str)
-  where
+  pub fn update_playlist_from_remote<I, R>(
+    &mut self,
+    remote_playlist_items: I,
+    default_format: MimeType,
+  ) where
     I: IntoIterator<Item = R>,
     R: Borrow<ResourceId>,
   {
+    // Determine the download format
+    let format = self.remote_default_format().unwrap_or(default_format);
+
     // Take all existing entries so we can re-order them and detect local additions.
     let old_entries = std::mem::take(&mut self.entries);
     let mut remaining: BTreeMap<ResourceId, MediaEntry> = old_entries
@@ -529,9 +661,7 @@ impl M3U8Playlist {
         let mut meta = vec![MediaMeta::ExtComment(ExtMediaComment::RemoteMedia(
           remote_url.clone(),
         ))];
-        meta.push(MediaMeta::ExtComment(ExtMediaComment::RemoteFormat(
-          format.to_string(),
-        )));
+        meta.push(MediaMeta::ExtComment(ExtMediaComment::RemoteFormat(format)));
         new_entries.push(MediaEntry {
           meta,
           media_source: MediaSource::Url(remote_url),
@@ -586,7 +716,7 @@ fn flush_pending_media_meta(
           ExtPlaylistComment::UnknownExtComment(comment),
         ));
       },
-      MediaMeta::ExtComment(_) => {
+      MediaMeta::ExtComment(..) => {
         return Err(M3U8PlaylistParseError::DanglingMediaMetadata);
       },
     }
@@ -622,11 +752,28 @@ fn push_playlist_ext_checked(
         }
       }
     },
-    ExtPlaylistComment::SkipRemoteDownloadPlaylist => {
+    ExtPlaylistComment::RemotePlaylistDefaultFormat(new_format) => {
+      for existing in playlist_meta.iter() {
+        if let PlaylistMeta::PlaylistExt(ExtPlaylistComment::RemotePlaylistDefaultFormat(
+          old_format,
+        )) = existing
+        {
+          if old_format == new_format {
+            return Ok(());
+          }
+          return Err(M3U8PlaylistParseError::ConflictingExtTag {
+            tag: "#EXTMEDIA_REMOTE_FORMAT",
+            first: old_format.as_str().to_string(),
+            second: new_format.as_str().to_string(),
+          });
+        }
+      }
+    },
+    ExtPlaylistComment::RemoteSkipPlaylistDownload => {
       let already = playlist_meta.iter().any(|m| {
         matches!(
           m,
-          PlaylistMeta::PlaylistExt(ExtPlaylistComment::SkipRemoteDownloadPlaylist)
+          PlaylistMeta::PlaylistExt(ExtPlaylistComment::RemoteSkipPlaylistDownload)
         )
       });
       if already {
@@ -644,7 +791,7 @@ fn push_playlist_ext_checked(
         return Ok(());
       }
     },
-    ExtPlaylistComment::UnknownExtComment(_) => {
+    ExtPlaylistComment::UnknownExtComment(..) => {
       // Unknown tags are opaque; we don't attempt to dedupe them.
     },
   }
@@ -683,8 +830,8 @@ fn push_media_ext_checked(
           }
           return Err(M3U8PlaylistParseError::ConflictingExtTag {
             tag: "#EXTMEDIA_REMOTE_FORMAT",
-            first: old_format.clone(),
-            second: new_format.clone(),
+            first: old_format.as_str().to_string(),
+            second: new_format.as_str().to_string(),
           });
         }
       }
@@ -731,7 +878,7 @@ fn push_media_ext_checked(
         return Ok(());
       }
     },
-    ExtMediaComment::UnknownExtComment(_) => {
+    ExtMediaComment::UnknownExtComment(..) => {
       // Unknown tags are opaque; we don't attempt to dedupe them.
     },
   }
@@ -747,40 +894,4 @@ fn parse_url_from_rest(rest: &str, tag: &'static str) -> Result<Url, M3U8Playlis
     parse_error,
   })?;
   Ok(url)
-}
-
-/// Parse a playlist-level `#EXT…` line.
-///
-/// Returns `Ok(Some(_))` only for tags with a playlist-level prefix
-/// (`#EXTPLAYLIST_*` or `#EXTM3U`). Other `#EXT…` tags return `Ok(None)`
-/// so the caller can decide whether they're media-level or unclassified.
-///
-/// Unknown `#EXTPLAYLIST_*` tags are captured as
-/// [`ExtPlaylistComment::UnknownExtComment`] so they round-trip untouched.
-fn parse_playlist_ext(line: &str) -> Result<Option<ExtPlaylistComment>, M3U8PlaylistParseError> {
-  if let Some(rest) = line.strip_prefix("#EXTPLAYLIST_REMOTE") {
-    // Only treat this as `#EXTPLAYLIST_REMOTE <url>` when the following
-    // character is whitespace (or the tag is bare, matching the
-    // original error path).
-    if rest.chars().next().map_or(true, char::is_whitespace) {
-      let url = parse_url_from_rest(rest, "#EXTPLAYLIST_REMOTE")?;
-      return Ok(Some(ExtPlaylistComment::RemotePlaylist(url)));
-    }
-  }
-
-  if line.trim_end() == "#EXTPLAYLIST_REMOTE_SKIP_DOWNLOAD" {
-    return Ok(Some(ExtPlaylistComment::SkipRemoteDownloadPlaylist));
-  }
-
-  if line.trim_end() == "#EXTM3U" {
-    return Ok(Some(ExtPlaylistComment::EXTM3UMarker));
-  }
-
-  if line.starts_with("#EXTPLAYLIST_") {
-    return Ok(Some(ExtPlaylistComment::UnknownExtComment(
-      line[1..].to_string(),
-    )));
-  }
-
-  Ok(None)
 }
