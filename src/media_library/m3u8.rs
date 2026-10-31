@@ -33,12 +33,11 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::bail;
 use thiserror::Error;
 use url::{ParseError, Url};
 
 use crate::media_library::mime_type::MimeType;
-use crate::media_library::resource_id::ResourceId;
+use crate::media_library::resource_id::{MediaResourceId, PlaylistResourceId};
 use crate::utils::AbsoluteFilePath;
 
 pub enum MediaSource {
@@ -79,12 +78,12 @@ pub struct MediaEntry {
 
 impl MediaEntry {
   #[must_use]
-  pub fn resource_id(&self) -> ResourceId {
+  pub fn media_id(&self) -> MediaResourceId {
     let resource_id = self
-      .remote_resource_id()
+      .remote_media_id()
       .unwrap_or_else(|| match self.media_source {
-        MediaSource::Url(ref url) => ResourceId::from(url),
-        MediaSource::File(ref path) => ResourceId::LocalFile(path.to_owned()),
+        MediaSource::Url(ref url) => MediaResourceId::from(url),
+        MediaSource::File(ref path) => MediaResourceId::LocalMediaFile(path.to_owned()),
       });
     resource_id
   }
@@ -96,8 +95,8 @@ impl MediaEntry {
     });
   }
 
-  pub fn set_remote_resource_id(&mut self, resource_id: &ResourceId) {
-    let url = resource_id.to_url();
+  pub fn set_remote_media_id(&mut self, media_id: &MediaResourceId) {
+    let url = media_id.to_url();
 
     if let Some(MediaMeta::ExtComment(ExtMediaComment::RemoteMedia(existing))) =
       self.meta.iter_mut().find(|item| {
@@ -116,9 +115,9 @@ impl MediaEntry {
   }
 
   #[must_use]
-  pub fn remote_resource_id(&self) -> Option<ResourceId> {
+  pub fn remote_media_id(&self) -> Option<MediaResourceId> {
     self.meta.iter().find_map(|item| match item {
-      MediaMeta::ExtComment(ExtMediaComment::RemoteMedia(url)) => Some(ResourceId::from(url)),
+      MediaMeta::ExtComment(ExtMediaComment::RemoteMedia(url)) => Some(MediaResourceId::from(url)),
       _ => None,
     })
   }
@@ -178,7 +177,7 @@ impl ExtPlaylistComment {
       }
     }
 
-    if let Some(rest) = line.strip_prefix("#EXTMEDIA_REMOTE_FORMAT") {
+    if let Some(rest) = line.strip_prefix("#EXTPLAYLIST_REMOTE_DEFAULT_FORMAT") {
       if rest.is_empty() {
         return Err(M3U8PlaylistParseError::RemoteFormatMissing);
       }
@@ -361,7 +360,7 @@ pub enum M3U8PlaylistParseError {
 }
 
 impl M3U8Playlist {
-  pub fn set_playlist_resource_id(&mut self, resource_id: ResourceId) -> anyhow::Result<()> {
+  pub fn set_remote_playlist_id(&mut self, playlist_id: PlaylistResourceId) -> anyhow::Result<()> {
     // Drop any previous remote reference or skip download marker.
     self.playlist_meta.retain(|meta| {
       !matches!(
@@ -372,38 +371,30 @@ impl M3U8Playlist {
       )
     });
 
-    match resource_id {
-      ResourceId::YtPlaylistId(yt_id) => {
-        self.playlist_meta.push(PlaylistMeta::PlaylistExt(
-          ExtPlaylistComment::RemotePlaylist(yt_id.to_url()),
-        ));
-      },
-      ResourceId::UnknownUrl(url) => {
-        self.playlist_meta.push(PlaylistMeta::PlaylistExt(
-          ExtPlaylistComment::RemotePlaylist(url),
-        ));
-      },
-      ResourceId::LocalFile(..) => {
+    match playlist_id {
+      PlaylistResourceId::LocalPlaylistFile(..) => {
         self.playlist_meta.push(PlaylistMeta::PlaylistExt(
           ExtPlaylistComment::RemoteSkipPlaylistDownload,
         ));
       },
-      other_id => bail!(format!(
-        "Can't set {other_id:?} as a remote playlist source."
-      )),
+      _ => {
+        self.playlist_meta.push(PlaylistMeta::PlaylistExt(
+          ExtPlaylistComment::RemotePlaylist(playlist_id.to_url()),
+        ));
+      },
     }
 
     Ok(())
   }
 
   #[must_use]
-  pub fn resource_id(&self) -> Option<ResourceId> {
+  pub fn playlist_id(&self) -> Option<PlaylistResourceId> {
     let resource_id = self
       .playlist_meta
       .iter()
       .find_map(|playlist_meta| match playlist_meta {
         PlaylistMeta::PlaylistExt(ExtPlaylistComment::RemotePlaylist(url)) => {
-          Some(ResourceId::from(url))
+          Some(PlaylistResourceId::from(url))
         },
         _ => None,
       });
@@ -609,11 +600,11 @@ impl M3U8Playlist {
   }
 
   #[must_use]
-  pub fn find(&self, resource_id: &ResourceId) -> Option<&MediaEntry> {
+  pub fn find_media_entry(&self, media_id: &MediaResourceId) -> Option<&MediaEntry> {
     self
       .entries
       .iter()
-      .find(|media_entry| media_entry.resource_id() == *resource_id)
+      .find(|media_entry| media_entry.media_id() == *media_id)
   }
 
   pub fn add_media_entry(&mut self, url: Url, format: MimeType) {
@@ -632,16 +623,16 @@ impl M3U8Playlist {
     default_format: MimeType,
   ) where
     I: IntoIterator<Item = R>,
-    R: Borrow<ResourceId>,
+    R: Borrow<MediaResourceId>,
   {
     // Determine the download format
     let format = self.remote_default_format().unwrap_or(default_format);
 
     // Take all existing entries so we can re-order them and detect local additions.
     let old_entries = std::mem::take(&mut self.entries);
-    let mut remaining: BTreeMap<ResourceId, MediaEntry> = old_entries
+    let mut remaining: BTreeMap<_, _> = old_entries
       .into_iter()
-      .map(|entry| (entry.resource_id(), entry))
+      .map(|entry| (entry.media_id(), entry))
       .collect();
 
     let remote_playlist_items_iter = remote_playlist_items.into_iter();

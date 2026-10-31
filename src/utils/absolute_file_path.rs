@@ -4,6 +4,7 @@ use std::{
   path::{Path, PathBuf, absolute},
 };
 
+use anyhow::bail;
 use url::Url;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -45,6 +46,17 @@ impl AbsoluteFilePath {
   pub fn to_url(&self) -> Url {
     Url::from_file_path(&self.0)
       .expect("This can only error if the path is not absolute which we checked")
+  }
+}
+
+impl TryFrom<&Path> for AbsoluteFilePath {
+  type Error = anyhow::Error;
+
+  fn try_from(value: &Path) -> Result<Self, Self::Error> {
+    let Some(selv) = Self::new(value) else {
+      bail!("Path is not absolute")
+    };
+    Ok(selv)
   }
 }
 

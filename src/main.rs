@@ -45,7 +45,7 @@ fn convert_format_to_mime_type(format_str: &str) -> anyhow::Result<MimeType> {
     "opus" => MimeType::Audio(AudioSubtype::Opus),
     "wav" => MimeType::Audio(AudioSubtype::Wav),
     "mkv" => MimeType::Video(VideoSubtype::Mkv),
-    other => bail!("Failed to convert {format_str} to a MIME type."),
+    _ => bail!("Failed to convert {format_str} to a MIME type."),
   })
 }
 

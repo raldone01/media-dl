@@ -13,7 +13,7 @@ use crate::{
   lyrics::{LrcLibError, LrclibClient, Lyrics, LyricsPresence, TrackQuery, embed_lyrics_tag},
   media_library::{
     mime_type::{AudioSubtype, MimeType},
-    resource_id::ResourceId,
+    resource_id::MediaResourceId,
   },
   utils::{
     AbsoluteFilePath, TaggedFileWithPath, file_ext, filesystem_safe_file_name, smart_rename,
@@ -22,7 +22,7 @@ use crate::{
 };
 
 pub trait MediaItem: fmt::Display {
-  fn resource_id(&self) -> &ResourceId;
+  fn media_id(&self) -> &MediaResourceId;
   fn mime_type(&self) -> MimeType;
   fn original_file_path(&self) -> &AbsoluteFilePath;
   /// TODO: renaming needs more thought and coordination
@@ -45,8 +45,8 @@ macro_rules! delegate {
 
 impl MediaFile {
   #[must_use]
-  pub fn resource_id(&self) -> &ResourceId {
-    delegate!(self, inner => inner.resource_id())
+  pub fn media_id(&self) -> &MediaResourceId {
+    delegate!(self, inner => inner.media_id())
   }
 
   #[must_use]
@@ -79,7 +79,7 @@ impl fmt::Display for MediaFile {
 pub struct AudioFile {
   original_file_path: AbsoluteFilePath,
   renamed_file_path: Option<AbsoluteFilePath>,
-  resource_id: ResourceId,
+  media_id: MediaResourceId,
   mime_type: AudioSubtype,
   lyrics_presence: LyricsPresence,
   title: Option<String>,
@@ -89,8 +89,8 @@ pub struct AudioFile {
 }
 
 impl MediaItem for AudioFile {
-  fn resource_id(&self) -> &ResourceId {
-    &self.resource_id
+  fn media_id(&self) -> &MediaResourceId {
+    &self.media_id
   }
 
   fn mime_type(&self) -> MimeType {
@@ -123,14 +123,14 @@ impl AudioFile {
     let Some(tag) = tagged_file.tag() else {
       bail!("No tag found in the file")
     };
-    let resource_id = yt_id_from_tag(tag).map(ResourceId::YtMediaId);
-    let resource_id = match resource_id {
-      Some(resource_id) => resource_id,
+    let media_id = yt_id_from_tag(tag).map(MediaResourceId::YtMediaId);
+    let media_id = match media_id {
+      Some(media_id) => media_id,
       None => {
         let Some(absolute_file_path) = AbsoluteFilePath::new(&file_path) else {
           bail!("{} is not a absolute path", file_path.display());
         };
-        ResourceId::LocalFile(absolute_file_path)
+        MediaResourceId::LocalMediaFile(absolute_file_path)
       },
     };
 
@@ -147,7 +147,7 @@ impl AudioFile {
     Ok(Self {
       original_file_path: absolute_path,
       renamed_file_path: None,
-      resource_id,
+      media_id,
       mime_type,
       lyrics_presence,
       title,
@@ -281,7 +281,7 @@ impl fmt::Display for AudioFile {
     write!(
       f,
       "Song \"{pretty_name}\" {}",
-      self.resource_id.to_url().to_string(),
+      self.media_id.to_url().to_string(),
     )
   }
 }

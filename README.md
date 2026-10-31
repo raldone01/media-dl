@@ -12,9 +12,6 @@ Implement cooldowns and retries (exponential bounded backoff).
 Implement watching a cookies.txt until it is replaced with new ones.
 Ask the user to change them when it fails.
 
-TODO: REMOVE THE FORMAT HINT its useless anyways maybe better to add a playlist hint. i mean we still need the hints for untracked files but it would probably be better to have like a TYPE hint like AUDIO or VIDEO or something like that don't know but we must handle them okay i decided lets go with MEDIA_TYPE <AUDIO,VIDEO,..> and just add --audio-format opus --video-format mkv (set a default for both)
-TODO: rename untracked files
-
 * TODO: handle rename collisions for playlists and media items
 * TODO: Genres
 * TODO: popularimeter scaled with an exponential based on views?

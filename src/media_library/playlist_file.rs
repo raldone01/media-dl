@@ -9,7 +9,7 @@ use anyhow::{Context as _, anyhow, bail};
 use url::Url;
 
 use crate::{
-  media_library::{m3u8::M3U8Playlist, resource_id::ResourceId},
+  media_library::{m3u8::M3U8Playlist, resource_id::PlaylistResourceId},
   utils::{file_ext, filesystem_safe_file_name, safe_overwrite, smart_rename},
 };
 
@@ -47,10 +47,10 @@ impl PlaylistFile {
   pub fn queue_rename(&mut self, new_playlist_name: &str) -> anyhow::Result<()> {
     let mut file_name = filesystem_safe_file_name(new_playlist_name);
     if file_name.is_empty()
-      && let Some(resource_id) = self.m3u8_playlist.resource_id()
+      && let Some(playlist_id) = self.m3u8_playlist.playlist_id()
     {
-      let resource_id_str = String::from(&resource_id);
-      file_name = filesystem_safe_file_name(&resource_id_str);
+      let playlist_id_str = playlist_id.to_string();
+      file_name = filesystem_safe_file_name(&playlist_id_str);
     }
     if file_name.is_empty() {
       bail!("Failed to compute a file name for {}", self);
@@ -111,13 +111,13 @@ impl fmt::Display for PlaylistFile {
       .or(self.renamed_file_path.as_ref())
       .map(|path| path.to_string_lossy())
       .unwrap_or(Cow::Borrowed("Unknown playlist file path"));
-    let resource_id = self.m3u8_playlist.resource_id();
+    let resource_id = self.m3u8_playlist.playlist_id();
     write!(
       f,
       "Playlist \"{file_path}\" {}",
       resource_id
         .as_ref()
-        .map(ResourceId::to_url)
+        .map(PlaylistResourceId::to_url)
         .as_ref()
         .map(Url::to_string)
         .unwrap_or_else(|| format!("{:?}", resource_id)),

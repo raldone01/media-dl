@@ -1,4 +1,4 @@
-//! TODO: handle rename collisions
+//! TODO: handle rename collisions in a smarter way
 //! TODO: keep dirty content flags for only rewriting playlists we changed
 
 use std::collections::BTreeMap;
@@ -24,7 +24,7 @@ use crate::CRATE_NAME;
 use crate::lyrics::LrclibClient;
 use crate::media_library::m3u8::MediaSource;
 use crate::media_library::mime_type::MimeType;
-use crate::media_library::resource_id::ResourceId;
+use crate::media_library::resource_id::{MediaResourceId, PlaylistResourceId, ResourceId};
 use crate::media_library::{AudioFile, MediaFile, PlaylistFile};
 use crate::utils::{
   CacheDirState, OperationCancelled, dir_is_cache_dir, file_ext, file_name_as_str,
@@ -42,7 +42,7 @@ enum ScannedFile {
 
 pub struct MediaLibrary<'a> {
   /// Keeps track of all media files that exist on disk.
-  media_files: BTreeMap<ResourceId, BTreeMap<MimeType, MediaFile>>,
+  media_files: BTreeMap<MediaResourceId, BTreeMap<MimeType, MediaFile>>,
   /// Keeps track of playlists.
   playlists: Vec<PlaylistFile>,
   /// Keeps track of standalone media files.
@@ -86,7 +86,8 @@ impl<'a> MediaLibrary<'a> {
       .map_err(|OperationCancelled| anyhow!("Library scan cancelled"))?;
 
     // collects existing media files
-    let mut media_files: BTreeMap<ResourceId, BTreeMap<MimeType, MediaFile>> = Default::default();
+    let mut media_files: BTreeMap<MediaResourceId, BTreeMap<MimeType, MediaFile>> =
+      Default::default();
     // collects existing playlists
     let mut playlists: Vec<PlaylistFile> = Default::default();
     let mut standalone_playlists: Vec<PlaylistFile> = Default::default();
@@ -96,14 +97,14 @@ impl<'a> MediaLibrary<'a> {
         ScannedFile::Playlist(p) => playlists.push(p),
         ScannedFile::StandalonePlaylist(p) => standalone_playlists.push(p),
         ScannedFile::MediaFile(m) => {
-          let media_file_entry = media_files.entry(m.resource_id().clone()).or_default();
+          let media_file_entry = media_files.entry(m.media_id().clone()).or_default();
           let media_type_entry = media_file_entry.entry(m.mime_type());
           match media_type_entry {
             std::collections::btree_map::Entry::Occupied(occupied_entry) => {
               let existing_media_file = occupied_entry.get();
               bail!(
                 "Duplicate media file {} of same MIME type: {} {}",
-                m.resource_id().to_string(),
+                m.media_id().to_string(),
                 m.original_file_path().display(),
                 existing_media_file.original_file_path().display()
               )
@@ -225,10 +226,10 @@ impl<'a> MediaLibrary<'a> {
                 .iter()
                 .find(|(_, media_file)| media_file.original_file_path() == file_path)
             })
-            .map(|(_, media_file)| Cow::Borrowed(media_file.resource_id())),
-          MediaSource::Url(remote_url) => Some(Cow::Owned(ResourceId::from(remote_url))),
+            .map(|(_, media_file)| Cow::Borrowed(media_file.media_id())),
+          MediaSource::Url(remote_url) => Some(Cow::Owned(MediaResourceId::from(remote_url))),
         };
-        let remote_resource_id = media_item.remote_resource_id();
+        let remote_resource_id = media_item.remote_media_id();
         match (media_entry_pointed_resource_id, remote_resource_id) {
           (Some(media_entry_pointed_resource_id), Some(remote_resource_id)) => {
             if *media_entry_pointed_resource_id != remote_resource_id {
@@ -240,7 +241,7 @@ impl<'a> MediaLibrary<'a> {
             }
           },
           (Some(media_entry_pointed_resource_id), None) => {
-            media_item.set_remote_resource_id(&media_entry_pointed_resource_id);
+            media_item.set_remote_media_id(&media_entry_pointed_resource_id);
           },
           (None, Some(_remote_resource_id)) => {
             // fine, just means we didn't download a remote media entry yet.
@@ -270,20 +271,23 @@ impl<'a> MediaLibrary<'a> {
   fn add_url(&mut self, url: &Url, format: MimeType) -> anyhow::Result<()> {
     let resource_id = ResourceId::from(url);
     let url = resource_id.to_url();
-    let existing_media_file = self
-      .media_files
-      .get(&resource_id)
-      .and_then(|files_by_resource: &BTreeMap<MimeType, MediaFile>| files_by_resource.get(&format));
+    let existing_media_file = if let ResourceId::Media(ref media_id) = resource_id {
+      self.media_files.get(&media_id).and_then(
+        |files_by_media_id: &BTreeMap<MimeType, MediaFile>| files_by_media_id.get(&format),
+      )
+    } else {
+      None
+    };
     let media_file_info_string = existing_media_file
       .map(|existing_media_file| format!("{existing_media_file}"))
       .unwrap_or_else(|| url.to_string());
     match resource_id {
-      ResourceId::YtMediaId(_) => {
+      ResourceId::Media(media_id @ MediaResourceId::YtMediaId(..)) => {
         // add the song to standalone_playlists if not part of them already
         let standalone_playlist_entry = self
           .standalone_playlists
           .iter()
-          .find(|item| item.m3u8_playlist.find(&resource_id).is_some());
+          .find(|item| item.m3u8_playlist.find_media_entry(&media_id).is_some());
 
         if standalone_playlist_entry.is_some() {
           // already listed on an standalone playlist
@@ -297,12 +301,14 @@ impl<'a> MediaLibrary<'a> {
           info!("Added {media_file_info_string} as standalone media!")
         }
       },
-      ResourceId::YtPlaylistId(ref yt_playlist_id) => {
+      ResourceId::Playlist(
+        ref playlist_id @ PlaylistResourceId::YtPlaylistId(ref yt_playlist_id),
+      ) => {
         // add a new playlist to playlists
         let playlist_is_already_part_of_library = self
           .playlists
           .iter()
-          .find(|playlist| playlist.m3u8_playlist.resource_id().as_ref() == Some(&resource_id))
+          .find(|playlist| playlist.m3u8_playlist.playlist_id().as_ref() == Some(&playlist_id))
           .is_some();
 
         if !playlist_is_already_part_of_library {
@@ -313,7 +319,7 @@ impl<'a> MediaLibrary<'a> {
           let mut playlist = PlaylistFile::new(file_path);
           playlist
             .m3u8_playlist
-            .set_playlist_resource_id(resource_id.clone())?;
+            .set_remote_playlist_id(playlist_id.clone())?;
           playlist.m3u8_playlist.set_remote_default_format(format);
           self.playlists.push(playlist);
         } else {
@@ -354,9 +360,9 @@ impl<'a> MediaLibrary<'a> {
     default_format: MimeType,
     abort_token: &AtomicBool,
   ) -> anyhow::Result<()> {
-    let resource_id = playlist.m3u8_playlist.resource_id();
-    match resource_id {
-      Some(ResourceId::YtPlaylistId(ref yt_playlist_id)) => {
+    let playlist_id = playlist.m3u8_playlist.playlist_id();
+    match playlist_id {
+      Some(PlaylistResourceId::YtPlaylistId(ref yt_playlist_id)) => {
         // query playlist information from yt
         let yt_playlist_info = YtPlaylistMeta::download_playlist_meta(yt_playlist_id, abort_token)?;
         playlist.queue_rename(&yt_playlist_info.title)?;
@@ -364,7 +370,7 @@ impl<'a> MediaLibrary<'a> {
           yt_playlist_info
             .entries
             .into_iter()
-            .map(|item| ResourceId::YtMediaId(item.id)),
+            .map(|item| MediaResourceId::YtMediaId(item.id)),
           default_format,
         );
         Ok(())
@@ -389,12 +395,12 @@ impl<'a> MediaLibrary<'a> {
     abort_token: &AtomicBool,
     temp_dir: &TempDir,
     lrclib_client: &LrclibClient,
-    resource_id: ResourceId,
+    media_id: MediaResourceId,
     format: MimeType,
   ) -> anyhow::Result<MediaFile> {
-    let media_file = match resource_id {
-      ResourceId::YtMediaId(ref yt_media_id) => {
-        info!("Downloading {}", resource_id.to_url().to_string());
+    let media_file = match media_id {
+      MediaResourceId::YtMediaId(ref yt_media_id) => {
+        info!("Downloading {}", media_id.to_url().to_string());
         let mut audio_file = download_yt_audio(
           &media_library_path,
           yt_media_id,
@@ -410,19 +416,13 @@ impl<'a> MediaLibrary<'a> {
         }
         MediaFile::Audio(audio_file)
       },
-      ResourceId::LocalFile(..) => {
+      MediaResourceId::LocalMediaFile(..) => {
         bail!("Can't download a local file")
-      },
-      ResourceId::YtPlaylistId(..) => {
-        bail!(
-          "Playlists are not accepted when downloading media items: {}",
-          resource_id.to_url().to_string()
-        )
       },
       _ => {
         bail!(
           "Don't know how to download media item: {}",
-          resource_id.to_url().to_string()
+          media_id.to_url().to_string()
         )
       },
     };
@@ -442,7 +442,7 @@ impl<'a> MediaLibrary<'a> {
       }
     }
 
-    let mut all_wanted_media_and_formats = BTreeMap::<ResourceId, BTreeSet<MimeType>>::new();
+    let mut all_wanted_media_and_formats = BTreeMap::<MediaResourceId, BTreeSet<MimeType>>::new();
     // collect all media items listed on playlists and the standalone lists
     for playlist in self
       .playlists
@@ -459,15 +459,15 @@ impl<'a> MediaLibrary<'a> {
             .remote_default_format()
             .unwrap_or_else(|| default_format)
         });
-        let media_to_download_by_resource_id = all_wanted_media_and_formats
-          .entry(media_entry.resource_id())
+        let media_to_download_by_media_id = all_wanted_media_and_formats
+          .entry(media_entry.media_id())
           .or_default();
-        media_to_download_by_resource_id.insert(desired_media_format);
+        media_to_download_by_media_id.insert(desired_media_format);
       }
     }
 
-    for (resource_id, wanted_formats) in all_wanted_media_and_formats {
-      let existing_formats = self.media_files.get(&resource_id);
+    for (media_id, wanted_formats) in all_wanted_media_and_formats {
+      let existing_formats = self.media_files.get(&media_id);
 
       let missing_formats: Vec<_> = wanted_formats
         .into_iter()
@@ -486,11 +486,11 @@ impl<'a> MediaLibrary<'a> {
           self.abort_token,
           &self.temp_dir,
           self.lrclib_client,
-          resource_id.clone(),
+          media_id.clone(),
           media_format_to_download,
         ) {
           Ok(media_file) => {
-            let existing_formats = self.media_files.entry(resource_id.clone());
+            let existing_formats = self.media_files.entry(media_id.clone());
             existing_formats
               .or_default()
               .insert(media_format_to_download, media_file);
@@ -498,7 +498,7 @@ impl<'a> MediaLibrary<'a> {
           Err(error) => {
             error!(
               "Failed to download {}: {error:#}",
-              resource_id.to_url().to_string()
+              media_id.to_url().to_string()
             );
           },
         }
@@ -508,7 +508,7 @@ impl<'a> MediaLibrary<'a> {
       // TODO: impl
 
       // 3. update all already downloaded formats with the stored meta data
-      if let Some(existing_formats) = self.media_files.get_mut(&resource_id) {
+      if let Some(existing_formats) = self.media_files.get_mut(&media_id) {
         for (_, existing_media_file) in existing_formats {
           if let Err(error) =
             existing_media_file.check_media_meta(self.lrclib_client, &self.temp_dir.path())
@@ -530,8 +530,7 @@ impl<'a> MediaLibrary<'a> {
     {
       let playlist_default_format = playlist.m3u8_playlist.remote_default_format();
       for playlist_media_entry in &mut playlist.m3u8_playlist.entries {
-        let Some(media_files_for_format) =
-          self.media_files.get(&playlist_media_entry.resource_id())
+        let Some(media_files_for_format) = self.media_files.get(&playlist_media_entry.media_id())
         else {
           // error??
           continue;
